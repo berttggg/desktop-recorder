@@ -1,0 +1,16 @@
+# Core analysis backends
+anthropic            # Claude backend (ANALYSIS_BACKEND=claude)
+google-genai>=1.15   # Gemini native-video backend (ANALYSIS_BACKEND=gemini)
+
+# Audio capture (system loopback + mic) on Windows
+pyaudiowpatch
+
+# Local transcription (Claude/local backends)
+faster-whisper
+
+# Local semantic-search knowledge base
+fastembed
+numpy
+
+# Note: ffmpeg/ffprobe must be on PATH or placed in ./ffmpeg/.
+# The GUI uses tkinter (bundled with Python). Python 3.10+ recommended.

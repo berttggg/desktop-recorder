@@ -1,0 +1,25 @@
+# --- Python ---
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# --- Bundled binaries (users install their own ffmpeg; too large for git) ---
+ffmpeg/
+
+# --- Recorded data & generated output (private; never publish) ---
+recordings/
+*.mp4
+*.wav
+*.mkv
+knowledge_base.db
+dashboard.html
+
+# --- User-local preferences / state ---
+_settings.json
+
+# --- OS / editor cruft ---
+.DS_Store
+Thumbs.db
+*.log
