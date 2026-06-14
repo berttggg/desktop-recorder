@@ -218,9 +218,16 @@ def _session_documents(session_id, data):
             yield ("todo", t)
 
 
-def _doc_hash(units):
-    """Stable hash of the (kind, text) units, so we only re-embed on change."""
+def _doc_hash(units, sig=""):
+    """Stable hash of the (kind, text) units, so we only re-embed on change.
+
+    ``sig`` is the active embedder's signature (backend:model:dim). Folding it in
+    means switching the embedding backend/model invalidates every session's hash,
+    so the next index/reindex re-embeds them under the new model automatically."""
     h = hashlib.sha1()
+    if sig:
+        h.update(("sig:" + sig).encode("utf-8"))
+        h.update(b"\x02")
     for kind, text in units:
         h.update(kind.encode("utf-8"))
         h.update(b"\x00")
@@ -237,12 +244,17 @@ def _index_embeddings(db, session_id, data, log=print):
     except Exception:
         return
     if not embed.available():
-        log("Embeddings: fastembed not installed — skipping semantic index.")
+        log(f"Embeddings: {embed.label()} backend unavailable — skipping semantic index.")
         return
     units = list(_session_documents(session_id, data))
     if not units:
         return
-    h = _doc_hash(units)
+    sig = ""
+    try:
+        sig = embed.signature()
+    except Exception:
+        sig = ""
+    h = _doc_hash(units, sig)
     if kb.embed_hashes(db).get(session_id) == h:
         log("Embeddings: content unchanged — reusing existing index.")
         return
@@ -264,17 +276,25 @@ def reindex(rec_dir, force=False, log=print):
     except Exception:
         embed = None
     if embed is None or not embed.available():
-        log("Embeddings unavailable — install fastembed first.")
+        if embed is None:
+            log("Embeddings unavailable — install fastembed first.")
+        else:
+            log(f"Embeddings unavailable — {embed.label()} backend can't run "
+                "(check the API key for the Gemini backend, or install fastembed).")
         return 0
     db = kb.db_path(rec_dir)
     payloads = kb.session_payloads(db)
     have = {} if force else kb.embed_hashes(db)
+    try:
+        sig = embed.signature()
+    except Exception:
+        sig = ""
     total = skipped = 0
     for p in payloads:
         units = list(_session_documents(p["id"], p))
         if not units:
             continue
-        h = _doc_hash(units)
+        h = _doc_hash(units, sig)
         if have.get(p["id"]) == h:
             skipped += 1
             continue
@@ -282,7 +302,7 @@ def reindex(rec_dir, force=False, log=print):
         kb.save_embeddings(db, p["id"],
                            [(k, t, v) for (k, t), v in zip(units, vecs)], doc_hash=h)
         total += len(units)
-    log(f"Reindexed {len(payloads)} session(s) → {total} new unit(s)"
+    log(f"Reindexed {len(payloads)} session(s) → {total} new unit(s) via {embed.label()}"
         + (f" ({skipped} unchanged, skipped)." if skipped else "."))
     return total
 

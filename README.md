@@ -18,7 +18,8 @@ of thought, and can answer "what was I working on last Tuesday afternoon?" by
   produces a clean summary: what you did, what you finished, what's still open,
   and the key topics.
 - **Builds a personal knowledge base** — every day is saved and indexed so you can
-  search your own past by meaning (local semantic search), not just text.
+  search your own past by meaning, not just text. Embeddings run **on-device for
+  free by default**, or switch to **Gemini embeddings** for higher-quality search.
 - **Works while you work** — on the Gemini backend it analyzes each ~10-minute
   chunk live, so your day report is essentially ready the moment you stop.
 - **Stays running through hiccups** — automatic model failover means if a model is
@@ -43,7 +44,17 @@ of thought, and can answer "what was I working on last Tuesday afternoon?" by
 - **Live model discovery**: the model picker is populated from the API, so newly
   released models show up automatically.
 - **Knowledge base dashboard**: a local web UI to browse past days and search
-  them by meaning (local embeddings via fastembed).
+  them by meaning.
+- **Selectable embedding backend**: choose how the knowledge base is embedded for
+  search, right in the GUI —
+  - **Local (default)** — fastembed (`BAAI/bge-small-en-v1.5`, 384-dim) on CPU;
+    offline, free, and fully private.
+  - **Gemini** — Google's hosted `gemini-embedding-*` models (e.g.
+    `gemini-embedding-2`); higher quality, but sends your KB text + queries to
+    the cloud. The model list is discovered live from the API.
+
+  Switching backends transparently re-embeds your existing days, and search only
+  ever compares vectors from the same model, so the two never get mixed up.
 
 ## ⚠️ Data & privacy — read this first
 
@@ -70,10 +81,13 @@ screen and audio leaving your machine and being processed (and possibly
 human-reviewed) by third-party AI providers.
 
 If you want to reduce exposure: use a **paid** API key (paid tiers are not used
-for training), prefer the Claude backend, or simply don't record sensitive
-screens. Recordings, transcripts, reports, and the knowledge-base database
-themselves stay **local** (under `recordings/`, which is git-ignored) — it's the
-*analysis* step that ships your content to the cloud.
+for training), prefer the Claude backend, keep embeddings on the **Local**
+backend, or simply don't record sensitive screens. Recordings, transcripts,
+reports, and the knowledge-base database themselves stay **local** (under
+`recordings/`, which is git-ignored) — it's the *analysis* step (and, if you pick
+the **Gemini** embedding backend, the *search-indexing* step) that ships your
+content to the cloud. With the default **Local** embedding backend, search runs
+entirely on your machine.
 
 ## Requirements
 

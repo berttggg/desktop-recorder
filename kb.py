@@ -233,22 +233,31 @@ def search(path, query_vec, k=12, kinds=None):
 
     Returns [{score, session_id, kind, text, date, report_path}] best-first.
     Brute force is fine here — a personal KB has at most a few thousand rows.
+
+    Only vectors whose dimension matches the query are compared. Different
+    embedding backends/models produce different dimensions; restricting to the
+    query's dimension keeps np.vstack safe and means a freshly switched backend
+    searches only what's been re-embedded under it (run a reindex to migrate).
     """
     import numpy as np
+    q = np.asarray(query_vec, dtype="float32").ravel()
+    qd = int(q.shape[0])
+    if qd == 0:
+        return []
     conn = connect(path)
     try:
         sql = ("SELECT e.session_id, e.kind, e.text, e.vec, s.date, s.report_path"
-               " FROM embeddings e LEFT JOIN sessions s ON s.id = e.session_id")
-        params = ()
+               " FROM embeddings e LEFT JOIN sessions s ON s.id = e.session_id"
+               " WHERE e.dim = ?")
+        params = [qd]
         if kinds:
-            sql += " WHERE e.kind IN (%s)" % ",".join("?" * len(kinds))
-            params = tuple(kinds)
+            sql += " AND e.kind IN (%s)" % ",".join("?" * len(kinds))
+            params += list(kinds)
         rows = conn.execute(sql, params).fetchall()
     finally:
         conn.close()
     if not rows:
         return []
-    q = np.asarray(query_vec, dtype="float32")
     qn = float(np.linalg.norm(q)) or 1.0
     mat = np.vstack([np.frombuffer(r["vec"], dtype="float32") for r in rows])
     norms = np.linalg.norm(mat, axis=1)

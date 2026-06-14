@@ -6,16 +6,18 @@ backend that embeds the query at search time and compares it against the stored
 vectors — that's what this does.
 
 Run it and a browser opens to the dashboard. Typing in the search box hits
-GET /search?q=...&k=..., which embeds the query locally (fastembed) and returns
-the best-matching sessions by cosine similarity. Everything is served from
-127.0.0.1 only; nothing leaves the machine.
+GET /search?q=...&k=..., which embeds the query with the configured backend
+(see embed.py — local fastembed by default, or Gemini) and returns the
+best-matching sessions by cosine similarity. The page itself is served from
+127.0.0.1 only; with the local backend nothing leaves the machine, whereas the
+Gemini backend sends each query to Google to embed.
 
     python serve.py                # serve + open browser
-    python serve.py --reindex      # rebuild embeddings first (after upgrades)
+    python serve.py --reindex      # rebuild embeddings first (after a backend switch)
     python serve.py --port 9000 --no-browser
 
-If fastembed isn't installed, /search returns {"error": ...} and the page
-falls back to its plain substring filter automatically.
+If the embedding backend isn't available, /search returns {"error": ...} and the
+page falls back to its plain substring filter automatically.
 """
 
 import os
@@ -159,7 +161,14 @@ def main(argv=None):
     except Exception as e:
         print(f"Could not rebuild dashboard ({e}); serving existing file.")
 
-    if not embed.available():
+    if embed.available():
+        where = ("on-device, offline" if embed.current()[0] == "local"
+                 else "CLOUD — search queries are sent to Google")
+        print(f"Embedding backend: {embed.label()} ({where}).")
+    elif embed.current()[0] == "gemini":
+        print("Note: Gemini embedding backend is selected but not ready (missing "
+              "GEMINI_API_KEY or google-genai) — search falls back to substring matching.")
+    else:
         print("Note: fastembed not installed — search falls back to substring matching.")
         print("      Install with:  pip install fastembed")
 

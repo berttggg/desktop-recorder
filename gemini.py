@@ -241,6 +241,50 @@ def list_models(force=False):
     return list(_MODELS_CACHE)
 
 
+# Embedding models the key can use for semantic search (separate from the
+# video-analysis models above). Verified live: an AI-Studio key exposes
+# gemini-embedding-001 (2048-tok input, 3072-dim default) plus the newer
+# gemini-embedding-2 / -2-preview (8192-tok input). Output dim is configurable
+# (we default to 768 — see embed.GEMINI_DIM).
+KNOWN_EMBED_MODELS = [
+    "gemini-embedding-001",
+    "gemini-embedding-2",
+    "gemini-embedding-2-preview",
+]
+_EMBED_MODELS_CACHE = None
+
+
+def _is_embed_model(m):
+    """True for models that support the embedContent action."""
+    return "embedContent" in (getattr(m, "supported_actions", None) or [])
+
+
+def list_embed_models(force=False):
+    """Live list of embedding-capable model names from the API (cached).
+
+    Mirrors :func:`list_models`: KNOWN_EMBED_MODELS first, then any extras the
+    key has access to, sorted. Never raises — falls back to KNOWN_EMBED_MODELS
+    offline / without a key, and only caches a real (non-empty) API result."""
+    global _EMBED_MODELS_CACHE
+    if _EMBED_MODELS_CACHE is not None and not force:
+        return list(_EMBED_MODELS_CACHE)
+    names = []
+    if available():
+        try:
+            for m in _client().models.list():
+                if _is_embed_model(m):
+                    names.append((m.name or "").replace("models/", ""))
+        except Exception:
+            names = []
+    live = set(names)
+    if not live:
+        return list(KNOWN_EMBED_MODELS)
+    known = [m for m in KNOWN_EMBED_MODELS if m in live]
+    extra = sorted(m for m in live if m not in KNOWN_EMBED_MODELS)
+    _EMBED_MODELS_CACHE = known + extra
+    return list(_EMBED_MODELS_CACHE)
+
+
 # --------------------------------------------------------------------------
 # Parsing / timestamp helpers (pure — unit-testable without the network)
 # --------------------------------------------------------------------------

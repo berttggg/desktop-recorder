@@ -318,6 +318,30 @@ class RecorderApp:
             # An explicit prior in-app choice wins over the import-time default.
             self._apply_model(announce=False, force=True)
 
+        # ---- Embedding (semantic-search) backend -------------------------
+        # Independent of the analysis backend: you can analyze with Claude or
+        # Gemini yet still choose how the knowledge base is embedded for search —
+        # local (offline, free) or Gemini (cloud, higher quality, uses quota).
+        try:
+            import embed as _emb
+            _eb, _em, _ = _emb.current()
+        except Exception:
+            _eb, _em = "local", "BAAI/bge-small-en-v1.5"
+        embed_values = self._build_embed_options(cur_backend=_eb, cur_model=_em)
+        default_embed = self._embed_label_for(_eb, _em)
+
+        ttk.Label(ana, text="Embedding:").grid(row=2, column=0, sticky="w",
+                                               padx=(10, 4), pady=(0, 10))
+        self.embed_var = tk.StringVar(value=default_embed)
+        self.embed_combo = ttk.Combobox(ana, textvariable=self.embed_var,
+                                        values=embed_values, state="readonly")
+        self.embed_combo.grid(row=2, column=1, sticky="we", padx=(4, 4), pady=(0, 10))
+        self.embed_combo.bind("<<ComboboxSelected>>", self._apply_embed)
+        self.embed_refresh_btn = ttk.Button(ana, text="↻", width=3,
+                                            command=self._refresh_embed_models)
+        self.embed_refresh_btn.grid(row=2, column=2, sticky="w", padx=(0, 10), pady=(0, 10))
+        self._applied_embed = default_embed
+
         # ---- Action buttons ----------------------------------------------
         btns = ttk.Frame(root)
         btns.pack(fill="x", padx=14, pady=(0, 8))
@@ -361,6 +385,12 @@ class RecorderApp:
                  "(even mid-recording) and is remembered. You can also type any model name.")
         _ToolTip(self.model_refresh_btn, "Refresh this list from Google — pulls every model your "
                  "key can use right now (including new ones). Needs an internet connection.")
+        _ToolTip(self.embed_combo, "How your knowledge base is embedded for semantic search. "
+                 "'Local' runs on your machine (offline, free, private). 'Gemini' is higher "
+                 "quality but sends your KB text and search queries to Google (uses free-tier "
+                 "quota). Switching re-embeds existing days automatically.")
+        _ToolTip(self.embed_refresh_btn, "Refresh the Gemini embedding-model list from Google. "
+                 "Needs a GEMINI_API_KEY and an internet connection.")
         _ToolTip(self.analyze_btn, "Run AI analysis on the most recent recording and open the report.")
         _ToolTip(self.dash_btn, "Open your cross-day knowledge base: summaries, to-dos and search.")
         _ToolTip(self.open_btn, "Open the folder where recordings and reports are saved.")
@@ -372,11 +402,20 @@ class RecorderApp:
         else:
             self.write(f"Using ffmpeg: {self.ffmpeg}")
         self._log_backend_status()
+        self._log_embed_status()
         self._update_backend_badge()
         # Quietly pull the live model list so the dropdown reflects what the key
         # can actually use (incl. newly released models), without blocking launch.
         if os.environ.get("ANALYSIS_BACKEND", "claude").strip().lower() == "gemini":
             self._refresh_models(announce=False, initial=True)
+        # Embedding is independent of the analysis backend, so refresh its model
+        # list whenever a Gemini key is present (even on the Claude backend).
+        try:
+            import gemini as _g
+            if _g.available():
+                self._refresh_embed_models(announce=False, initial=True)
+        except Exception:
+            pass
 
     def _log_backend_status(self):
         """Print one clear backend line at startup so a misconfigured analysis
@@ -455,7 +494,8 @@ class RecorderApp:
         combo = "readonly" if enabled else "disabled"
         st = "normal" if enabled else "disabled"
         for w, s in ((self.audio_combo, combo), (self.mic_refresh_btn, st),
-                     (self.fps_spin, st), (self.sysaudio_chk, st), (self.live_chk, st)):
+                     (self.fps_spin, st), (self.sysaudio_chk, st), (self.live_chk, st),
+                     (self.embed_combo, combo), (self.embed_refresh_btn, st)):
             try:
                 w.config(state=s)
             except Exception:
@@ -539,6 +579,163 @@ class RecorderApp:
         self.model_combo["values"] = values
         if announce:
             self.write(f"Found {len(models)} model(s) available to your key.")
+
+    # ---- Embedding (semantic-search) backend ------------------------------
+    _LOCAL_EMBED_LABEL = "Local · bge-small-en-v1.5 (offline)"
+    _LOCAL_EMBED_MODEL = "BAAI/bge-small-en-v1.5"
+
+    def _build_embed_options(self, gmodels=None, cur_backend=None, cur_model=None):
+        """Build the dropdown choices and a {label: (backend, model)} map. The
+        offline local model first, then each known/discovered Gemini embedding
+        model. A current custom Gemini model is kept visible."""
+        mapping = {self._LOCAL_EMBED_LABEL: ("local", self._LOCAL_EMBED_MODEL)}
+        opts = [self._LOCAL_EMBED_LABEL]
+        if gmodels is None:
+            try:
+                import gemini
+                gmodels = list(getattr(gemini, "KNOWN_EMBED_MODELS", []))
+            except Exception:
+                gmodels = ["gemini-embedding-001"]
+        gmodels = list(gmodels)
+        if cur_backend == "gemini" and cur_model and cur_model not in gmodels:
+            gmodels = [cur_model] + gmodels
+        for m in gmodels:
+            lbl = f"Gemini · {m}  (cloud)"
+            mapping[lbl] = ("gemini", m)
+            opts.append(lbl)
+        self._embed_map = mapping
+        return opts
+
+    def _embed_label_for(self, backend, model):
+        """Reverse-lookup the dropdown label for a (backend, model) pair."""
+        for lbl, (b, m) in (getattr(self, "_embed_map", {}) or {}).items():
+            if b == backend and m == model:
+                return lbl
+        return self._LOCAL_EMBED_LABEL
+
+    def _log_embed_status(self):
+        """One startup line so the active embedding backend (and whether it sends
+        data to the cloud) is never a surprise."""
+        try:
+            import embed
+            local = embed.current()[0] == "local"
+            where = ("on-device — nothing leaves your machine" if local else
+                     "CLOUD — your KB text + search queries are sent to Google")
+            self.write(f"Search embeddings: {embed.label()} ({where}).")
+        except Exception:
+            pass
+
+    def _apply_embed(self, *_args, announce=True, force=False):
+        """Switch the embedding backend/model used for indexing and search, save
+        it, and re-embed the existing knowledge base so past days stay
+        searchable under the new model."""
+        label = (self.embed_var.get() or "").strip()
+        if not label:
+            return
+        if not force and label == getattr(self, "_applied_embed", None):
+            return
+        backend, model = (getattr(self, "_embed_map", {}) or {}).get(
+            label, ("local", self._LOCAL_EMBED_MODEL))
+        try:
+            import embed
+            embed.set_backend(backend, model)
+        except Exception as e:
+            if announce:
+                self.write(f"Couldn't switch embedding backend: {e}")
+            return
+        self._applied_embed = label
+        self._settings["embed_backend"] = backend
+        if backend == "gemini":
+            self._settings["embed_gemini_model"] = model
+        else:
+            self._settings["embed_local_model"] = model
+        _save_settings(self._settings)
+        self._update_backend_badge()
+        if announce:
+            if backend == "gemini":
+                self.write(f"Embedding → {label}.  ⚠ Cloud: your KB text (summaries, "
+                           "to-dos, topics) and every search query will be sent to "
+                           "Google to embed.")
+            else:
+                self.write(f"Embedding → {label}.  Runs on-device; nothing leaves "
+                           "your machine.")
+            self._reindex_async()
+
+    def _reindex_async(self):
+        """Re-embed every analyzed session under the current model, off-thread.
+        Needed after a backend switch because search only compares vectors of the
+        matching dimension."""
+        def log(m):
+            self.root.after(0, self.write, m)
+
+        def work():
+            try:
+                import embed
+                import insights
+                if not embed.available():
+                    log("Re-embed skipped — the chosen embedding backend isn't "
+                        "ready (for Gemini, set GEMINI_API_KEY and reopen).")
+                    return
+                log("Re-embedding the knowledge base with the new model… "
+                    "(one-time, so existing days are searchable again).")
+                n = insights.reindex(REC_DIR, force=True, log=log)
+                if n == 0:
+                    log("Nothing to re-embed yet (no analyzed sessions).")
+            except Exception as e:
+                log(f"Re-embed failed: {e}")
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _refresh_embed_models(self, announce=True, initial=False):
+        """Pull embedding-capable models the key can use from Google and refresh
+        the dropdown. Background thread; falls back to the built-in list."""
+        try:
+            import gemini
+            if not gemini.available():
+                if announce:
+                    self.write("Embedding-model list needs a Gemini key — set "
+                               "GEMINI_API_KEY (setx) and reopen.")
+                return
+        except Exception:
+            if announce:
+                self.write("google-genai not installed — can't refresh embedding models.")
+            return
+        try:
+            self.embed_refresh_btn.config(state="disabled")
+        except Exception:
+            pass
+        if announce:
+            self.write("Fetching available Gemini embedding models…")
+
+        def work():
+            try:
+                import gemini
+                models = gemini.list_embed_models(force=not initial)
+                self.root.after(0, self._embed_models_refreshed, models, None, announce)
+            except Exception as e:
+                self.root.after(0, self._embed_models_refreshed, None, str(e), announce)
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _embed_models_refreshed(self, models, err, announce):
+        """Back on the GUI thread: apply the fetched embedding-model list."""
+        try:
+            self.embed_refresh_btn.config(state="normal")
+        except Exception:
+            pass
+        if err or not models:
+            if announce:
+                self.write(f"Couldn't fetch embedding models "
+                           f"({err or 'none returned'}) — keeping the built-in list.")
+            return
+        cur_label = (self.embed_var.get() or "").strip()
+        cur_backend, cur_model = (getattr(self, "_embed_map", {}) or {}).get(
+            cur_label, ("local", None))
+        opts = self._build_embed_options(gmodels=models, cur_backend=cur_backend,
+                                         cur_model=cur_model)
+        self.embed_combo["values"] = opts
+        if announce:
+            self.write(f"Found {len(models)} embedding model(s) available to your key.")
 
     # ---- UI helpers -------------------------------------------------------
     def write(self, msg):
