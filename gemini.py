@@ -124,6 +124,9 @@ FAILOVER_MODELS = [
 FAILOVER_RETRIES = int(os.environ.get("GEMINI_FAILOVER_RETRIES", "2"))
 UPLOAD_TIMEOUT = float(os.environ.get("GEMINI_UPLOAD_TIMEOUT", "900"))
 POLL_INTERVAL = 2.0
+# Each upload is retried this many times before the window is skipped — a flaky
+# network often times out / resets the first connection but succeeds on a retry.
+UPLOAD_ATTEMPTS = max(1, int(os.environ.get("GEMINI_UPLOAD_ATTEMPTS", "3")))
 MAX_TOKENS_SEG = int(os.environ.get("GEMINI_MAX_TOKENS_SEG", "2048"))
 MAX_TOKENS_REDUCE = int(os.environ.get("GEMINI_MAX_TOKENS_REDUCE", "1500"))
 
@@ -180,6 +183,49 @@ def available():
         return False
 
 
+_APP_DIR = os.path.dirname(os.path.abspath(__file__))
+_SETTINGS_PATH = os.path.join(_APP_DIR, "_settings.json")
+
+
+def _read_settings():
+    try:
+        with open(_SETTINGS_PATH, encoding="utf-8") as f:
+            d = json.load(f)
+            return d if isinstance(d, dict) else {}
+    except Exception:
+        return {}
+
+
+def proxy_url():
+    """Outbound proxy for reaching Google, or '' for a direct connection.
+
+    Many networks can't open a direct connection to
+    ``generativelanguage.googleapis.com`` — a corporate firewall, or a region
+    where Google itself is blocked. The signature is every upload / generate /
+    embed failing with ``WinError 10060`` (connection timed out) or ``10013``
+    (socket forbidden). The fix is to tunnel through a local proxy / VPN, e.g. a
+    Clash / V2Ray client listening on ``http://127.0.0.1:7890``.
+
+    Resolution, first non-empty wins: ``RECORDER_PROXY``, then the standard
+    ``HTTPS_PROXY`` / ``ALL_PROXY`` env vars, then the ``"proxy"`` key in
+    ``_settings.json`` (set from the recorder GUI)."""
+    for k in ("RECORDER_PROXY", "HTTPS_PROXY", "https_proxy",
+              "ALL_PROXY", "all_proxy"):
+        v = os.environ.get(k)
+        if v and v.strip():
+            return v.strip()
+    v = _read_settings().get("proxy")
+    return v.strip() if isinstance(v, str) and v.strip() else ""
+
+
+def _http_timeout():
+    """httpx timeout for Google calls: fail a blocked CONNECT fast (so we retry
+    or report instead of hanging for minutes — we saw an 18-minute hang) while
+    still allowing a generous window to upload a proxy clip / stream a reply."""
+    import httpx
+    return httpx.Timeout(connect=20.0, read=300.0, write=600.0, pool=20.0)
+
+
 _CLIENT = None
 
 
@@ -187,8 +233,24 @@ def _client():
     global _CLIENT
     if _CLIENT is None:
         from google import genai
-        _CLIENT = genai.Client(api_key=_api_key())
+        from google.genai import types
+        args = {"timeout": _http_timeout()}
+        prox = proxy_url()
+        if prox:
+            args["proxy"] = prox
+        # client_args flow straight to the underlying httpx client; setting both
+        # sync + async keeps a future async path on the same proxy/timeout.
+        http_options = types.HttpOptions(client_args=args,
+                                         async_client_args=dict(args))
+        _CLIENT = genai.Client(api_key=_api_key(), http_options=http_options)
     return _CLIENT
+
+
+def reset_client():
+    """Drop the cached client so the next call rebuilds it — call after changing
+    the proxy (or key) so the new value takes effect without a restart."""
+    global _CLIENT
+    _CLIENT = None
 
 
 # Names that pass the 1M-token filter but aren't general video-analysis chat
@@ -422,8 +484,8 @@ def _state(f):
     return getattr(s, "name", str(s)) if s is not None else "UNKNOWN"
 
 
-def _upload_active(client, path, log):
-    """Upload a file and block until it reaches ACTIVE (or raise)."""
+def _upload_once(client, path):
+    """One upload attempt: send the file and block until ACTIVE (or raise)."""
     f = client.files.upload(file=path)
     waited = 0.0
     while _state(f) == "PROCESSING":
@@ -436,6 +498,51 @@ def _upload_active(client, path, log):
     if st != "ACTIVE":
         raise RuntimeError(f"upload not ACTIVE (state={st})")
     return f
+
+
+def _upload_active(client, path, log):
+    """Upload a file and block until ACTIVE, retrying on failure.
+
+    On flaky / restricted networks the first connection often times out or is
+    reset (WinError 10060 / 10013); a retry with a short backoff frequently
+    succeeds. Raises the last error only after every attempt fails."""
+    last = None
+    for attempt in range(1, UPLOAD_ATTEMPTS + 1):
+        try:
+            return _upload_once(client, path)
+        except Exception as e:
+            last = e
+            if attempt < UPLOAD_ATTEMPTS:
+                back = 2.0 * attempt
+                log(f"      upload attempt {attempt}/{UPLOAD_ATTEMPTS} failed "
+                    f"({e}); retrying in {back:.0f}s…")
+                time.sleep(back)
+    raise last
+
+
+_NET_WARNED = False
+
+
+def _warn_network_blocked(log):
+    """Print one clear, actionable hint when every upload fails — almost always
+    the network can't reach Google, not a bug in the recorder. Guarded so live
+    mode doesn't repeat it every chunk."""
+    global _NET_WARNED
+    if _NET_WARNED:
+        return
+    _NET_WARNED = True
+    prox = proxy_url()
+    if prox:
+        log(f"  ! Every upload to Google failed even via the proxy ({prox}). "
+            "Check the proxy/VPN is running and allows "
+            "generativelanguage.googleapis.com.")
+    else:
+        log("  ! Every upload to Google FAILED — this network can't reach "
+            "generativelanguage.googleapis.com (a firewall, or Google is "
+            "blocked in your region). Route through a local proxy/VPN: put its "
+            "address in the recorder's Proxy box (e.g. http://127.0.0.1:7890), "
+            "or run  setx RECORDER_PROXY http://127.0.0.1:7890  and restart. "
+            "Alternatively switch analysis to the Claude backend.")
 
 
 def _gen_config(max_tokens):
@@ -640,6 +747,7 @@ def analyze_one(seg, base, ffmpeg, log=print, client=None, thumbdir=None):
 
     blocks, transcript = [], []
     tidx = 0
+    upload_fails = 0
     for wi, (w0, w1) in enumerate(wins):
         # We always upload a lightweight proxy (low-fps, mono audio), never the
         # full-res original — see _make_upload_clip. For a multi-window segment
@@ -659,6 +767,7 @@ def analyze_one(seg, base, ffmpeg, log=print, client=None, thumbdir=None):
         try:
             f = _upload_active(client, upload_path, log)
         except Exception as e:
+            upload_fails += 1
             log(f"  upload failed for {os.path.basename(upload_path)}: {e}; skipping.")
             _safe_rm(upload_path)
             continue
@@ -692,6 +801,9 @@ def analyze_one(seg, base, ffmpeg, log=print, client=None, thumbdir=None):
             except Exception:
                 pass
             _safe_rm(upload_path)  # the proxy was a temp file
+
+    if wins and upload_fails == len(wins):
+        _warn_network_blocked(log)
 
     blocks.sort(key=lambda b: b["t0"])
     transcript.sort(key=lambda t: t[0])
@@ -735,18 +847,15 @@ def analyze_video(session_dir, ffmpeg, log=print):
 
 def _fallback_reduce(blocks):
     """Local synthesis when the Gemini reduce call fails — still collect to-dos."""
-    todos, seen = [], set()
+    todos = []
     for blk in blocks:
-        for td in (blk.get("todos") or []):
-            if td.lower() not in seen:
-                todos.append(td)
-                seen.add(td.lower())
+        todos += blk.get("todos") or []
     total = sum((b["t1"] - b["t0"]) for b in blocks) if blocks else 0
     return {
         "summary": f"Recorded {analyze.fmt_clock(total)} across {len(blocks)} "
                    f"block(s). Gemini synthesis was unavailable.",
         "accomplishments": [],
-        "action_items": todos,
+        "action_items": analyze.clean_todos(todos),
         "topics": [],
     }
 
@@ -775,15 +884,13 @@ def reduce(blocks, log=print):
     if not isinstance(data, dict):
         return _fallback_reduce(blocks)
 
-    # Fold in any per-block to-dos the synthesis missed.
-    seen = {a.lower() for a in (data.get("action_items") or [])}
+    # Fold in every per-block to-do, then tidy + fuzzy-de-duplicate the whole
+    # set so reworded variants and cue-prefixed dupes collapse to one clean item.
+    merged = list(data.get("action_items") or [])
     for blk in blocks:
-        for td in (blk.get("todos") or []):
-            if td.lower() not in seen:
-                data.setdefault("action_items", []).append(td)
-                seen.add(td.lower())
+        merged += blk.get("todos") or []
+    data["action_items"] = analyze.clean_todos(merged)
     data.setdefault("summary", "")
     data.setdefault("accomplishments", [])
-    data.setdefault("action_items", [])
     data.setdefault("topics", [])
     return data

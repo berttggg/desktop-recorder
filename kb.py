@@ -167,6 +167,21 @@ def topic_totals(path):
         conn.close()
 
 
+def day_count(path):
+    """Number of distinct calendar dates that have at least one session.
+
+    The dashboard's "days recorded" KPI uses this — several sessions on the same
+    day count as one day (the old len(sessions) over-counted)."""
+    conn = connect(path)
+    try:
+        return conn.execute(
+            "SELECT COUNT(DISTINCT date) FROM sessions"
+            " WHERE date IS NOT NULL AND date <> ''"
+        ).fetchone()[0]
+    finally:
+        conn.close()
+
+
 # --------------------------------------------------------------------------
 # Embeddings (semantic search)
 # --------------------------------------------------------------------------

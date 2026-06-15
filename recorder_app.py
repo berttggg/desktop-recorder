@@ -342,6 +342,17 @@ class RecorderApp:
         self.embed_refresh_btn.grid(row=2, column=2, sticky="w", padx=(0, 10), pady=(0, 10))
         self._applied_embed = default_embed
 
+        # ---- Proxy (reach Google through a local VPN/proxy) ---------------
+        ttk.Label(ana, text="Proxy:").grid(row=3, column=0, sticky="w",
+                                           padx=(10, 4), pady=(0, 10))
+        self.proxy_var = tk.StringVar(value=str(self._settings.get("proxy", "") or ""))
+        self.proxy_entry = ttk.Entry(ana, textvariable=self.proxy_var)
+        self.proxy_entry.grid(row=3, column=1, columnspan=2, sticky="we",
+                              padx=(4, 10), pady=(0, 10))
+        self.proxy_entry.bind("<Return>", self._apply_proxy)
+        self.proxy_entry.bind("<FocusOut>", self._apply_proxy)
+        self._applied_proxy = self.proxy_var.get().strip()
+
         # ---- Action buttons ----------------------------------------------
         btns = ttk.Frame(root)
         btns.pack(fill="x", padx=14, pady=(0, 8))
@@ -391,6 +402,12 @@ class RecorderApp:
                  "quota). Switching re-embeds existing days automatically.")
         _ToolTip(self.embed_refresh_btn, "Refresh the Gemini embedding-model list from Google. "
                  "Needs a GEMINI_API_KEY and an internet connection.")
+        _ToolTip(self.proxy_entry, "Optional. If this network can't reach Google directly "
+                 "(uploads fail with 'connection timed out' / 'forbidden'), enter a local "
+                 "proxy or VPN address such as http://127.0.0.1:7890. It's used for all "
+                 "Google calls (analysis, reduce, embeddings), applies right away, and is "
+                 "remembered. A RECORDER_PROXY or HTTPS_PROXY environment variable, if set, "
+                 "overrides this box.")
         _ToolTip(self.analyze_btn, "Run AI analysis on the most recent recording and open the report.")
         _ToolTip(self.dash_btn, "Open your cross-day knowledge base: summaries, to-dos and search.")
         _ToolTip(self.open_btn, "Open the folder where recordings and reports are saved.")
@@ -495,7 +512,8 @@ class RecorderApp:
         st = "normal" if enabled else "disabled"
         for w, s in ((self.audio_combo, combo), (self.mic_refresh_btn, st),
                      (self.fps_spin, st), (self.sysaudio_chk, st), (self.live_chk, st),
-                     (self.embed_combo, combo), (self.embed_refresh_btn, st)):
+                     (self.embed_combo, combo), (self.embed_refresh_btn, st),
+                     (self.proxy_entry, st)):
             try:
                 w.config(state=s)
             except Exception:
@@ -660,6 +678,30 @@ class RecorderApp:
                 self.write(f"Embedding → {label}.  Runs on-device; nothing leaves "
                            "your machine.")
             self._reindex_async()
+
+    def _apply_proxy(self, event=None):
+        """Persist the proxy address and rebuild the Gemini client so it takes
+        effect immediately (no restart). Used for every Google call — analysis,
+        reduce, and embeddings. Locked while recording (see
+        _set_settings_enabled), so this can't race the live worker."""
+        val = (self.proxy_var.get() or "").strip()
+        if val == getattr(self, "_applied_proxy", None):
+            return
+        self._applied_proxy = val
+        if val:
+            self._settings["proxy"] = val
+        else:
+            self._settings.pop("proxy", None)
+        _save_settings(self._settings)
+        try:
+            import gemini
+            gemini.reset_client()
+        except Exception:
+            pass
+        if val:
+            self.write(f"Proxy set to {val} — all Google calls now route through it.")
+        else:
+            self.write("Proxy cleared — connecting to Google directly.")
 
     def _reindex_async(self):
         """Re-embed every analyzed session under the current model, off-thread.

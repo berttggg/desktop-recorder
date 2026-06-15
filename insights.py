@@ -152,13 +152,13 @@ def _reduce(blocks, transcript, total_dur, log, use_ai=None):
                                      [{"type": "text", "text": prompt}],
                                      max_tokens=1500, log=log)
             if isinstance(data, dict):
-                # fold in any per-block todos the synthesis missed
-                seen = {a.lower() for a in data.get("action_items", []) or []}
+                # Fold in every per-block to-do, then tidy + fuzzy-de-duplicate
+                # the whole set so reworded variants ("Meet Jay" / "Meet with
+                # Jay") and cue-prefixed dupes collapse to one clean item.
+                merged = list(data.get("action_items") or [])
                 for blk in blocks:
-                    for td in blk["todos"]:
-                        if td.lower() not in seen:
-                            data.setdefault("action_items", []).append(td)
-                            seen.add(td.lower())
+                    merged += blk.get("todos") or []
+                data["action_items"] = analyze.clean_todos(merged)
                 return data
         except Exception as e:
             log(f"reduce error: {e}")
@@ -168,7 +168,7 @@ def _reduce(blocks, transcript, total_dur, log, use_ai=None):
         "summary": f"Recorded {analyze.fmt_clock(total_dur)} of activity across "
                    f"{len(blocks)} blocks. Set ANTHROPIC_API_KEY for an AI summary.",
         "accomplishments": [],
-        "action_items": _local_todos(transcript),
+        "action_items": analyze.clean_todos(_local_todos(transcript)),
         "topics": [],
     }
 
@@ -671,19 +671,35 @@ def _render_session_report(session_dir, session_id, insights, runs, time_breakdo
     return out
 
 
+def _dedup_todo_rows(rows):
+    """Collapse the same task repeated across sessions/days in the dashboard's
+    open-to-do list ("Meet Jay" carried over every day until it's done). Rows
+    arrive newest-first, so the surviving row keeps the most recent date + link."""
+    kept = []
+    for r in rows:
+        txt = (r.get("text") or "").strip()
+        if not txt:
+            continue
+        if any(analyze.todos_similar(txt, k.get("text") or "") for k in kept):
+            continue
+        kept.append(r)
+    return kept
+
+
 def build_dashboard(rec_dir, log=print):
     esc = html.escape
     path = kb.db_path(rec_dir)
-    todos = kb.open_action_items(path)
+    todos = _dedup_todo_rows(kb.open_action_items(path))
     sessions = kb.recent_sessions(path, limit=60)
     totals = kb.topic_totals(path)
+    days = kb.day_count(path)
 
     p = [f"<!doctype html><html><head><meta charset='utf-8'><title>Knowledge base</title>"
          f"<style>{CSS}</style></head><body><div class='wrap'>"]
     p.append("<h1>Personal knowledge base</h1>")
     total_min = sum(m for _t, m in totals)
     p.append("<div class='kpi'>"
-             f"<div class='b'><div class='n'>{len(sessions)}</div><div class='l'>days recorded</div></div>"
+             f"<div class='b'><div class='n'>{days}</div><div class='l'>days recorded</div></div>"
              f"<div class='b'><div class='n'>{len(todos)}</div><div class='l'>open to-dos</div></div>"
              f"<div class='b'><div class='n'>{total_min/60:.1f}h</div><div class='l'>time analyzed</div></div>"
              "</div>")

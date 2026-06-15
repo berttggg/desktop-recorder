@@ -123,6 +123,33 @@ entirely on your machine.
 - **`Open Dashboard.bat`** — open the knowledge-base dashboard in your browser to
   review and search past sessions.
 
+## Troubleshooting
+
+**Every upload fails / "connection timed out" / "forbidden" (WinError 10060 or
+10013).** The Gemini backend talks to `generativelanguage.googleapis.com`. If
+your network can't reach Google directly — a corporate firewall, or a region
+where Google is blocked — every upload (and the daily synthesis) fails and the
+report comes back empty. The fix is to route the recorder through a local
+proxy/VPN:
+
+- In the recorder GUI, put your proxy address in the **Proxy** box, e.g.
+  `http://127.0.0.1:7890` (the typical port for a Clash/V2Ray client). It
+  applies immediately and is remembered.
+- Or set it once from a terminal and restart the launcher:
+  ```
+  setx RECORDER_PROXY http://127.0.0.1:7890
+  ```
+  A standard `HTTPS_PROXY` / `ALL_PROXY` environment variable works too and
+  takes precedence over the GUI box. The proxy is used for **all** Google calls
+  — analysis, daily synthesis, and (if selected) Gemini embeddings.
+
+Uploads also now **retry with backoff** and fail fast on a dead connection
+instead of hanging, so a brief network blip no longer loses a whole chunk.
+
+If you can't use a proxy, switch analysis to the **Claude** backend
+(`Use Claude.bat`) and keep embeddings on **Local** — that path doesn't touch
+Google at all.
+
 ## Notes
 
 - `recordings/`, `ffmpeg/`, `_settings.json` and `__pycache__/` are intentionally
