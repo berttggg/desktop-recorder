@@ -667,6 +667,76 @@ def _dedup_todo_rows(rows):
     return kept
 
 
+def build_kb_overview(rec_dir, force=False, log=print):
+    """Generate + cache a model-written overview of recent work for the dashboard.
+
+    Cached in <rec_dir>/kb_overview.json keyed by a hash of the inputs (recent day
+    summaries + open to-dos), so the model is called only when those actually
+    change. Returns the overview text ('' if unavailable / no key)."""
+    path = kb.db_path(rec_dir)
+    sessions = kb.recent_sessions(path, limit=20)
+    todos = _dedup_todo_rows(kb.open_action_items(path))
+    cache_path = os.path.join(rec_dir, "kb_overview.json")
+
+    sig_src = json.dumps(
+        [(s.get("date"), s.get("id"), s.get("summary")) for s in sessions]
+        + [t.get("text") for t in todos],
+        ensure_ascii=False, sort_keys=True)
+    sig = hashlib.sha1(sig_src.encode("utf-8")).hexdigest()
+
+    if not force:
+        try:
+            with open(cache_path, encoding="utf-8") as f:
+                cached = json.load(f)
+            if cached.get("sig") == sig:
+                return cached.get("text", "")
+        except Exception:
+            pass
+
+    if not sessions:
+        return ""
+
+    lines = ["Recent days (newest first):"]
+    for s in sessions[:12]:
+        summ = (s.get("summary") or "").strip()
+        if summ:
+            lines.append(f"- {s.get('date','')}: {summ}")
+    if todos:
+        lines += ["", "Open to-dos:"]
+        for t in todos[:20]:
+            txt = (t.get("text") or "").strip()
+            if txt:
+                lines.append(f"- {txt}")
+
+    text = ""
+    try:
+        import gemini
+        if gemini.available():
+            log("Summarizing your recent work for the knowledge base…")
+            text = gemini.summarize_overview("\n".join(lines), log=log)
+    except Exception as e:
+        log(f"KB overview skipped ({e}).")
+        text = ""
+
+    if text:
+        try:
+            analyze.atomic_write_json(cache_path, {
+                "sig": sig, "text": text,
+                "generated": dt.datetime.now().isoformat(timespec="seconds")})
+        except Exception:
+            pass
+    return text
+
+
+def _read_kb_overview(rec_dir):
+    try:
+        with open(os.path.join(rec_dir, "kb_overview.json"), encoding="utf-8") as f:
+            d = json.load(f)
+        return (d.get("text") or "").strip(), (d.get("generated") or "")
+    except Exception:
+        return "", ""
+
+
 def build_dashboard(rec_dir, log=print):
     esc = html.escape
     path = kb.db_path(rec_dir)
@@ -684,6 +754,15 @@ def build_dashboard(rec_dir, log=print):
              f"<div class='b'><div class='n'>{len(todos)}</div><div class='l'>open to-dos</div></div>"
              f"<div class='b'><div class='n'>{total_min/60:.1f}h</div><div class='l'>time analyzed</div></div>"
              "</div>")
+
+    ov_text, ov_when = _read_kb_overview(rec_dir)
+    if ov_text:
+        paras = "".join(f"<p style='margin:6px 0'>{esc(ln)}</p>"
+                        for ln in ov_text.split("\n") if ln.strip())
+        when = (f" &nbsp;·&nbsp; <span style='text-transform:none;font-weight:400'>"
+                f"updated {esc(ov_when[:16].replace('T', ' '))}</span>") if ov_when else ""
+        p.append(f"<div class='card'><h2>Overview{when}</h2>"
+                 f"<div class='lead'>{paras}</div></div>")
 
     p.append("<div class='searchbar'>"
              "<input class='search' id='q' autocomplete='off' spellcheck='false' "

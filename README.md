@@ -18,8 +18,11 @@ of thought, and can answer "what was I working on last Tuesday afternoon?" by
   produces a clean summary: what you did, what you finished, what's still open,
   and the key topics.
 - **Builds a personal knowledge base** — every day is saved and indexed so you can
-  search your own past by meaning, not just text. Embeddings run **on-device for
-  free by default**, or switch to **Gemini embeddings** for higher-quality search.
+  search your own past by meaning, not just text. The dashboard opens with a
+  model-written **Overview** that ties your recent days together (what's
+  progressing, what got finished, and what to focus on next). Embeddings run
+  **on-device for free by default**, or switch to **Gemini embeddings** for
+  higher-quality search.
 - **Records now, uploads later** — recording only captures to disk in crash-safe
   ~10-minute segments; nothing is sent to the cloud until you click **Process
   recordings**. Ideal for spotty or restricted networks: record offline, then

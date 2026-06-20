@@ -142,7 +142,8 @@ POLL_INTERVAL = 2.0
 # network often times out / resets the first connection but succeeds on a retry.
 UPLOAD_ATTEMPTS = max(1, int(os.environ.get("GEMINI_UPLOAD_ATTEMPTS", "3")))
 MAX_TOKENS_SEG = int(os.environ.get("GEMINI_MAX_TOKENS_SEG", "2048"))
-MAX_TOKENS_REDUCE = int(os.environ.get("GEMINI_MAX_TOKENS_REDUCE", "1500"))
+MAX_TOKENS_REDUCE = int(os.environ.get("GEMINI_MAX_TOKENS_REDUCE", "2048"))
+MAX_TOKENS_OVERVIEW = int(os.environ.get("GEMINI_MAX_TOKENS_OVERVIEW", "700"))
 
 _MEDIA_RES = {
     "low": "MEDIA_RESOLUTION_LOW",
@@ -165,18 +166,37 @@ Reply with ONE JSON object and no prose:
 ]}}
 Use 1-6 blocks. Only state what the video/audio support; use "" or [] when unknown."""
 
-REDUCE_PROMPT = """Below is a chronological list of activity blocks from a
-user's day at their computer (time | activity | app | detail | todos).
+REDUCE_PROMPT = """You are writing a concise daily work journal from a log of what
+a user did on their computer. Each line is: time | activity | app | detail | todos.
 
-Synthesize it into ONE JSON object (no prose):
-{{"summary":"3-5 sentences: what the day was mostly about and what got done",
-  "accomplishments":["concrete things the user completed or made progress on"],
-  "action_items":["things the user still needs to do / follow up on"],
-  "topics":["canonical project or topic names, 2-6 of them"]}}
-Merge duplicates. Be specific and refer to real apps/files/topics seen.
+Reply with ONE JSON object (no prose, no markdown):
+{{"summary":"A specific 4-6 sentence narrative of the day: the main threads of
+   work, what actually got done, and roughly how the time was spent. Name the
+   real projects, files, apps, sites and people that appear. Avoid vague filler
+   like 'various tasks' or 'worked on the computer'.",
+  "accomplishments":["concrete outcomes the user completed or moved forward,
+     written as results (what now exists, works, or was decided), most important
+     first"],
+  "action_items":["specific things the user still needs to do or follow up on"],
+  "topics":["2-6 canonical project/topic names that organise the day"]}}
+Ground everything ONLY in the log. Merge duplicates and near-duplicates. If the
+day is light, keep the lists short rather than padding them.
 
-Activity blocks:
+Activity log:
 {blocks}"""
+
+
+OVERVIEW_PROMPT = """Below are short summaries of a user's most recent days of
+computer work (newest first), plus their currently-open to-dos.
+
+Write a brief, helpful overview to orient the user — plain text, no markdown
+headings, about 4-7 sentences. Cover the through-lines across these days, what is
+progressing, what was finished recently, and what still needs attention. Be
+specific and name the real projects/topics. Finish with one short line that
+starts with "Focus next:" naming the single most important open thing to pick up.
+Ground everything only in what is given; do not invent.
+
+{context}"""
 
 
 # --------------------------------------------------------------------------
@@ -686,6 +706,15 @@ def _gen_config(max_tokens):
     )
 
 
+def _text_config(max_tokens):
+    """Config for a plain-text (non-JSON) reply, e.g. the KB overview."""
+    from google.genai import types
+    return types.GenerateContentConfig(
+        temperature=0.3,
+        max_output_tokens=max_tokens,
+    )
+
+
 def _video_part(f):
     """A video Part referencing an uploaded file. We deliberately do NOT set
     video_metadata(start/end offset): the Gemini API rejects clip-offset
@@ -1042,3 +1071,20 @@ def reduce(blocks, log=print):
     data.setdefault("accomplishments", [])
     data.setdefault("topics", [])
     return data
+
+
+def summarize_overview(context, log=print):
+    """Model-written cross-day overview for the knowledge-base dashboard. Takes a
+    plain-text context (recent day summaries + open to-dos) and returns a short
+    narrative string, or '' on any failure (the caller then renders nothing)."""
+    context = (context or "").strip()
+    if not context:
+        return ""
+    prompt = OVERVIEW_PROMPT.format(context=context[:15000])
+    try:
+        resp = _generate(_client(), REDUCE_MODEL, [prompt],
+                         _text_config(MAX_TOKENS_OVERVIEW), log, "overview")
+        return (_resp_text(resp) or "").strip()
+    except Exception as e:
+        log(f"Gemini overview error: {e}")
+        return ""
