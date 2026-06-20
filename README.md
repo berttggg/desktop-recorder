@@ -53,8 +53,11 @@ of thought, and can answer "what was I working on last Tuesday afternoon?" by
   can pick the **Fallback model** to switch to in the GUI (or leave it on
   *(automatic)* for the built-in cheap-first chain), and an **Embedding
   fallback** for the Gemini embedding backend.
-- **Live model discovery**: the model picker is populated from the API, so newly
-  released models show up automatically.
+- **Live model discovery**: the model + embedding pickers are populated from the
+  API and refreshed on launch and periodically, so newly released models show up
+  on their own. Models are shown by their **exact dashboard display name** (e.g.
+  "Gemini 3.1 Flash Lite") to match Google's usage dashboard, and **Gemma**
+  models are listed too — marked "(text-only)" since they can't analyze video.
 - **Knowledge base dashboard**: a local web UI to browse past days and search
   them by meaning.
 - **Selectable embedding backend**: choose how the knowledge base is embedded for

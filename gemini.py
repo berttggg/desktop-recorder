@@ -317,6 +317,38 @@ def reset_client():
 _MODEL_DENY = ("tts", "-image", "image-", "embedding", "robotic",
                "computer-use", "deep-research", "audio", "vision")
 _MODELS_CACHE = None
+_DISPLAY = {}        # model id -> API display_name (the exact dashboard name)
+_IS_VIDEO = {}       # model id -> True if usable for video analysis
+
+# Also offer Gemma (text-only) models in the picker. They can't analyze video,
+# so they're labelled "(text-only)"; on by default (GEMINI_INCLUDE_GEMMA=0 off).
+INCLUDE_GEMMA = (os.environ.get("GEMINI_INCLUDE_GEMMA", "1").strip().lower()
+                 not in ("0", "false", "no", "off", ""))
+
+
+def pretty_name(model_id):
+    """Dashboard-style display name derived from a model id, e.g.
+    'gemini-3.1-flash-lite' -> 'Gemini 3.1 Flash Lite'. Used when the live API
+    display name isn't available (offline / not yet refreshed)."""
+    s = (model_id or "").replace("models/", "").replace("-", " ").title()
+    s = s.replace("Tts", "TTS").replace(" It", " IT")
+    return s or (model_id or "")
+
+
+def display_name(model_id):
+    """Exact API display name for a model id (matches the AI Studio dashboard),
+    falling back to pretty_name when not known from a live fetch."""
+    return _DISPLAY.get(model_id) or pretty_name(model_id)
+
+
+def model_label(model_id):
+    """Label for the analysis-model picker: the dashboard display name, with a
+    '(text-only)' suffix for non-video models (Gemma) so they're not mistaken
+    for analysis-capable."""
+    lbl = display_name(model_id)
+    if _IS_VIDEO.get(model_id) is False and "text-only" not in lbl.lower():
+        lbl += "  (text-only)"
+    return lbl
 
 
 def _is_video_model(m):
@@ -335,30 +367,47 @@ def _is_video_model(m):
     return not any(d in name for d in _MODEL_DENY)
 
 
-def list_models(force=False):
-    """Live list of video-capable Gemini model names from the API (cached).
+def _is_gemma(m):
+    """Gemma chat models — text-only on the Gemini API (no video). Offered in the
+    picker for completeness but clearly marked, never used for analysis silently."""
+    name = (getattr(m, "name", "") or "").replace("models/", "")
+    if not name.startswith("gemma"):
+        return False
+    return "generateContent" in (getattr(m, "supported_actions", None) or [])
 
-    The familiar KNOWN_MODELS come first (in their curated order), then any
-    newer/extra models the key has access to, sorted. Never raises: falls back
-    to KNOWN_MODELS if there's no key or the API can't be reached, and only
-    caches a real (non-empty) API result so a transient failure isn't sticky."""
+
+def list_models(force=False):
+    """Live list of model ids for the analysis picker (cached).
+
+    Video-capable Gemini models first (KNOWN_MODELS in curated order, then any
+    newer/extra ones sorted), then Gemma text-only models (if INCLUDE_GEMMA).
+    Side effect: records each model's API display_name (the exact dashboard name)
+    and video-capability in _DISPLAY/_IS_VIDEO so the GUI can label them. Never
+    raises: falls back to KNOWN_MODELS offline, caching only non-empty results."""
     global _MODELS_CACHE
     if _MODELS_CACHE is not None and not force:
         return list(_MODELS_CACHE)
-    names = []
+    video, gemma = [], []
     if available():
         try:
             for m in _client().models.list():
+                name = (m.name or "").replace("models/", "")
                 if _is_video_model(m):
-                    names.append((m.name or "").replace("models/", ""))
+                    video.append(name)
+                    _DISPLAY[name] = getattr(m, "display_name", "") or ""
+                    _IS_VIDEO[name] = True
+                elif INCLUDE_GEMMA and _is_gemma(m):
+                    gemma.append(name)
+                    _DISPLAY[name] = getattr(m, "display_name", "") or ""
+                    _IS_VIDEO[name] = False
         except Exception:
-            names = []
-    live = set(names)
-    if not live:
+            video, gemma = [], []
+    if not video and not gemma:
         return list(KNOWN_MODELS)
+    live = set(video)
     known = [m for m in KNOWN_MODELS if m in live]
     extra = sorted(m for m in live if m not in KNOWN_MODELS)
-    _MODELS_CACHE = known + extra
+    _MODELS_CACHE = known + extra + sorted(gemma)
     return list(_MODELS_CACHE)
 
 
@@ -394,7 +443,9 @@ def list_embed_models(force=False):
         try:
             for m in _client().models.list():
                 if _is_embed_model(m):
-                    names.append((m.name or "").replace("models/", ""))
+                    name = (m.name or "").replace("models/", "")
+                    names.append(name)
+                    _DISPLAY[name] = getattr(m, "display_name", "") or ""
         except Exception:
             names = []
     live = set(names)

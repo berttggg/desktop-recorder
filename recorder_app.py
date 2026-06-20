@@ -77,6 +77,9 @@ APP_DIR = os.path.dirname(os.path.abspath(__file__))
 CAPTURE_SEGMENT_SECONDS = int(os.environ.get("RECORDER_CAPTURE_SEGMENT_SECONDS", "600"))
 # How often the background muxer checks for a newly-finalized chunk to fold in.
 MUX_POLL_SECONDS = float(os.environ.get("RECORDER_MUX_POLL_SECONDS", "2"))
+# How often (minutes) to quietly re-check which models/embeddings the key can use
+# so the dropdowns stay current as Google adds/removes models. 0 disables.
+MODEL_REFRESH_MIN = int(os.environ.get("RECORDER_MODEL_REFRESH_MIN", "30"))
 
 
 def _default_rec_dir():
@@ -275,17 +278,22 @@ class RecorderApp:
         # ---- Analysis (Gemini) -------------------------------------------
         try:
             import gemini as _gem
-            model_values = list(getattr(_gem, "KNOWN_MODELS", []))
+            model_ids = list(getattr(_gem, "KNOWN_MODELS", []))
             default_model = _gem.MODEL
         except Exception:
-            model_values = ["gemini-2.5-flash", "gemini-2.5-flash-lite",
-                            "gemini-2.0-flash", "gemini-2.0-flash-lite"]
+            model_ids = ["gemini-2.5-flash", "gemini-2.5-flash-lite",
+                         "gemini-2.0-flash", "gemini-2.0-flash-lite"]
             default_model = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
         saved = self._settings.get("gemini_model")
         if saved:
             default_model = saved
-        if default_model and default_model not in model_values:
-            model_values = [default_model] + model_values
+        # Keep the current + saved-fallback ids in the list so their display
+        # labels resolve even before the first live refresh.
+        saved_fb = (self._settings.get("gemini_fallback_model") or "").strip()
+        for _mid in (default_model, saved_fb):
+            if _mid and _mid not in model_ids:
+                model_ids.append(_mid)
+        model_labels = self._build_model_options(model_ids)   # sets self._model_map
 
         ana = ttk.LabelFrame(root, text="Analysis")
         ana.pack(fill="x", padx=14, pady=(0, 8))
@@ -300,9 +308,9 @@ class RecorderApp:
 
         ttk.Label(ana, text="Gemini model:").grid(row=1, column=0, sticky="w",
                                                   padx=(10, 4), pady=(0, 10))
-        self.model_var = tk.StringVar(value=default_model)
+        self.model_var = tk.StringVar(value=self._model_label_for(default_model))
         self.model_combo = ttk.Combobox(ana, textvariable=self.model_var,
-                                        values=model_values)
+                                        values=model_labels)
         self.model_combo.grid(row=1, column=1, sticky="we", padx=(4, 4), pady=(0, 10))
         self.model_combo.bind("<<ComboboxSelected>>", self._apply_model)
         self.model_combo.bind("<Return>", self._apply_model)
@@ -318,7 +326,7 @@ class RecorderApp:
         self.model_fallback_var = tk.StringVar(value=self._fallback_model_label())
         self.model_fallback_combo = ttk.Combobox(
             ana, textvariable=self.model_fallback_var,
-            values=self._fallback_model_values(model_values))
+            values=self._fallback_model_values(model_ids))
         self.model_fallback_combo.grid(row=2, column=1, columnspan=2, sticky="we",
                                        padx=(4, 10), pady=(0, 10))
         self.model_fallback_combo.bind("<<ComboboxSelected>>", self._apply_fallback_model)
@@ -481,6 +489,10 @@ class RecorderApp:
             self._recover_unfinished()
         self._update_process_button()
 
+        # Keep the model + embedding dropdowns fresh over the session.
+        if MODEL_REFRESH_MIN > 0:
+            self.root.after(MODEL_REFRESH_MIN * 60 * 1000, self._auto_refresh_models)
+
     def _log_backend_status(self):
         """Print one clear backend line at startup so a misconfigured analysis
         backend is never silent. Distinguishes Gemini ready / no-key / no-SDK,
@@ -580,11 +592,46 @@ class RecorderApp:
                 "Analyze a recording first — the dashboard is built from your "
                 "analyzed sessions.")
 
+    # ---- Model picker labels (dashboard display names <-> model ids) ------
+    def _build_model_options(self, ids):
+        """Build dropdown labels (exact dashboard display names; Gemma marked
+        '(text-only)') and the {label: id} map. Returns the list of labels."""
+        try:
+            import gemini
+            label_fn = gemini.model_label
+        except Exception:
+            label_fn = lambda x: x
+        mapping, labels = {}, []
+        for mid in (ids or []):
+            if not mid:
+                continue
+            lbl = label_fn(mid)
+            if lbl in mapping and mapping[lbl] != mid:
+                lbl = f"{lbl} [{mid}]"
+            mapping[lbl] = mid
+            labels.append(lbl)
+        self._model_map = mapping
+        return labels
+
+    def _model_label_for(self, model_id):
+        """Reverse-lookup the display label for a model id (raw id if unknown)."""
+        for lbl, mid in (getattr(self, "_model_map", {}) or {}).items():
+            if mid == model_id:
+                return lbl
+        try:
+            import gemini
+            return gemini.model_label(model_id)
+        except Exception:
+            return model_id
+
     def _apply_model(self, *_args, announce=True, force=False):
-        """Push the chosen Gemini model into the backend so the next chunk /
-        analysis uses it. Lets you switch models when one's free daily quota is
-        used up — no restart needed. The choice is remembered across restarts."""
-        model = (self.model_var.get() or "").strip()
+        """Push the chosen Gemini model into the backend so the next analysis uses
+        it. The dropdown shows dashboard display names, so map the label back to
+        the model id first. No restart needed; remembered across restarts."""
+        label = (self.model_var.get() or "").strip()
+        if not label:
+            return
+        model = (getattr(self, "_model_map", {}) or {}).get(label, label).strip()
         if not model:
             return
         if not force and model == self._applied_model:
@@ -600,20 +647,35 @@ class RecorderApp:
         self._settings["gemini_model"] = model
         _save_settings(self._settings)
         if announce:
-            self.write(f"Gemini analysis model → {model}.")
+            self.write(f"Gemini analysis model → {gemini.display_name(model)}.")
         self._update_backend_badge()
 
     # ---- Fallback model (failover target) ---------------------------------
     def _fallback_model_label(self):
         v = (self._settings.get("gemini_fallback_model") or "").strip()
-        return v or self._AUTO_FALLBACK
+        if not v:
+            return self._AUTO_FALLBACK
+        return self._model_label_for(v)
 
-    def _fallback_model_values(self, model_values):
-        vals = [self._AUTO_FALLBACK]
-        for m in (model_values or []):
-            if m and m not in vals:
-                vals.append(m)
-        return vals
+    def _fallback_model_values(self, ids):
+        """'(automatic)' + display-name labels for each id; registers the labels
+        in the shared _model_map so they resolve back to ids on apply."""
+        try:
+            import gemini
+            label_fn = gemini.model_label
+        except Exception:
+            label_fn = lambda x: x
+        if not hasattr(self, "_model_map"):
+            self._model_map = {}
+        labels = [self._AUTO_FALLBACK]
+        for mid in (ids or []):
+            if not mid:
+                continue
+            lbl = label_fn(mid)
+            self._model_map.setdefault(lbl, mid)
+            if lbl not in labels:
+                labels.append(lbl)
+        return labels
 
     def _apply_fallback_model(self, *_args, announce=True, force=False):
         """Push the chosen fallback model into the backend. '(automatic)' clears
@@ -621,7 +683,10 @@ class RecorderApp:
         label = (self.model_fallback_var.get() or "").strip()
         if not force and label == getattr(self, "_applied_fallback_model", None):
             return
-        model = "" if (not label or label == self._AUTO_FALLBACK) else label
+        if not label or label == self._AUTO_FALLBACK:
+            model = ""
+        else:
+            model = (getattr(self, "_model_map", {}) or {}).get(label, label)
         try:
             import gemini
             gemini.set_fallback_model(model)
@@ -637,8 +702,8 @@ class RecorderApp:
         _save_settings(self._settings)
         if announce:
             if model:
-                self.write(f"Fallback model → {model} (used when the main model is "
-                           "overloaded or its daily quota is spent).")
+                self.write(f"Fallback model → {gemini.display_name(model)} (used when "
+                           "the main model is overloaded or its daily quota is spent).")
             else:
                 self.write("Fallback model → automatic (built-in failover chain).")
 
@@ -680,13 +745,15 @@ class RecorderApp:
                 self.write(f"Couldn't fetch model list ({err or 'none returned'}) "
                            "— keeping the built-in list.")
             return
-        current = (self.model_var.get() or "").strip()
-        values = list(models)
-        if current and current not in values:   # keep a typed/custom choice visible
-            values = [current] + values
-        self.model_combo["values"] = values
-        try:    # keep the fallback dropdown offering the same models
-            self.model_fallback_combo["values"] = self._fallback_model_values(values)
+        ids = list(models)
+        if self._applied_model and self._applied_model not in ids:
+            ids.insert(0, self._applied_model)   # keep the current choice visible
+        self.model_combo["values"] = self._build_model_options(ids)
+        self.model_var.set(self._model_label_for(self._applied_model))
+        try:    # keep the fallback dropdown in sync + show exact display names
+            self.model_fallback_combo["values"] = self._fallback_model_values(ids)
+            self.model_fallback_var.set(self._fallback_model_label())
+            self._applied_fallback_model = self.model_fallback_var.get()
         except Exception:
             pass
         if announce:
@@ -714,8 +781,13 @@ class RecorderApp:
         gmodels = list(gmodels)
         if cur_backend == "gemini" and cur_model and cur_model not in gmodels:
             gmodels = [cur_model] + gmodels
+        try:
+            import gemini
+            disp = gemini.display_name
+        except Exception:
+            disp = lambda x: x
         for m in gmodels:
-            lbl = f"Gemini · {m}  (cloud)"
+            lbl = f"{disp(m)}  (cloud)"     # exact dashboard name, e.g. "Gemini Embedding 2"
             mapping[lbl] = ("gemini", m)
             opts.append(lbl)
         self._embed_map = mapping
@@ -778,20 +850,42 @@ class RecorderApp:
 
     def _embed_fallback_label(self):
         v = (self._settings.get("embed_gemini_fallback_model") or "").strip()
-        return v or self._AUTO_FALLBACK
+        if not v:
+            return self._AUTO_FALLBACK
+        try:
+            import gemini
+            return gemini.display_name(v)
+        except Exception:
+            return v
 
     def _embed_fallback_values(self, gmodels=None):
+        """'(automatic)' + display-name labels for each Gemini embedding model;
+        sets self._embed_fallback_map {label: id} for apply to resolve."""
         if gmodels is None:
             try:
                 import gemini
                 gmodels = list(getattr(gemini, "KNOWN_EMBED_MODELS", []))
             except Exception:
                 gmodels = ["gemini-embedding-001"]
-        vals = [self._AUTO_FALLBACK]
-        for m in gmodels:
-            if m and m not in vals:
-                vals.append(m)
-        return vals
+        try:
+            import gemini
+            disp = gemini.display_name
+        except Exception:
+            disp = lambda x: x
+        ids = list(gmodels)
+        saved = (self._settings.get("embed_gemini_fallback_model") or "").strip()
+        if saved and saved not in ids:
+            ids.insert(0, saved)
+        mapping, labels = {}, [self._AUTO_FALLBACK]
+        for m in ids:
+            if not m:
+                continue
+            lbl = disp(m)
+            mapping[lbl] = m
+            if lbl not in labels:
+                labels.append(lbl)
+        self._embed_fallback_map = mapping
+        return labels
 
     def _apply_embed_fallback(self, *_args, announce=True, force=False):
         """Set the Gemini *embedding* fallback model. '(automatic)' = none. Only
@@ -799,7 +893,10 @@ class RecorderApp:
         label = (self.embed_fallback_var.get() or "").strip()
         if not force and label == getattr(self, "_applied_embed_fallback", None):
             return
-        model = "" if (not label or label == self._AUTO_FALLBACK) else label
+        if not label or label == self._AUTO_FALLBACK:
+            model = ""
+        else:
+            model = (getattr(self, "_embed_fallback_map", {}) or {}).get(label, label)
         try:
             import embed
             embed.set_gemini_fallback(model)
@@ -815,7 +912,12 @@ class RecorderApp:
         _save_settings(self._settings)
         if announce:
             if model:
-                self.write(f"Embedding fallback → {model} (used if the main Gemini "
+                try:
+                    import gemini
+                    disp = gemini.display_name(model)
+                except Exception:
+                    disp = model
+                self.write(f"Embedding fallback → {disp} (used if the main Gemini "
                            "embedding model fails).")
             else:
                 self.write("Embedding fallback → none.")
@@ -923,6 +1025,22 @@ class RecorderApp:
             pass
         if announce:
             self.write(f"Found {len(models)} embedding model(s) available to your key.")
+
+    def _auto_refresh_models(self):
+        """Periodic quiet refresh so the model + embedding dropdowns reflect what
+        the key can currently use. Skips while recording/processing, then reschedules."""
+        try:
+            if self.proc is None and not self.processing:
+                if os.environ.get("ANALYSIS_BACKEND", "claude").strip().lower() == "gemini":
+                    self._refresh_models(announce=False)
+                try:
+                    import gemini as _g
+                    if _g.available():
+                        self._refresh_embed_models(announce=False)
+                except Exception:
+                    pass
+        finally:
+            self.root.after(MODEL_REFRESH_MIN * 60 * 1000, self._auto_refresh_models)
 
     # ---- UI helpers -------------------------------------------------------
     def write(self, msg):
