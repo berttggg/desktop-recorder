@@ -140,6 +140,9 @@ entirely on your machine.
   runs in the background, is resumable, and opens the report when it finishes.
 - **`Open Dashboard.bat`** — open the knowledge-base dashboard in your browser to
   review and search past sessions.
+- **`Install Autostart.bat`** — make the recorder open automatically every time
+  you log in to Windows (it drops a hidden launcher in your Startup folder, so no
+  console window appears). Run **`Uninstall Autostart.bat`** to turn it off.
 
 ## Troubleshooting
 
