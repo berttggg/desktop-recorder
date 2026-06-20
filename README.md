@@ -146,7 +146,17 @@ entirely on your machine.
   review and search past sessions.
 - **`Install Autostart.bat`** — make the recorder open automatically every time
   you log in to Windows (it drops a hidden launcher in your Startup folder, so no
-  console window appears). Run **`Uninstall Autostart.bat`** to turn it off.
+  console window appears) and start **minimized to the system tray**. Run
+  **`Uninstall Autostart.bat`** to turn it off.
+
+**System tray.** The app lives in the Windows system tray so it can run quietly
+in the background. The tray icon shows status at a glance — **red = recording,
+orange = processing, grey = idle** — and its tooltip shows the live timer / how
+many recordings are waiting. **Right-click** for Open, Start/Stop recording,
+Process recordings, Open dashboard, and Quit; **left-click** opens the window.
+Closing the window with **✕ hides it to the tray (recording keeps running)** —
+use the tray's **Quit** to actually exit. (Needs `pystray` + `pillow`; if they're
+not installed the app just uses a normal window.)
 
 ## Troubleshooting
 

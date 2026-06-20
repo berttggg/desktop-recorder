@@ -209,7 +209,7 @@ class _ToolTip:
 
 
 class RecorderApp:
-    def __init__(self, root):
+    def __init__(self, root, start_minimized=False):
         self.root = root
         self.ffmpeg = find_ffmpeg()
         self.proc = None
@@ -492,6 +492,16 @@ class RecorderApp:
         # Keep the model + embedding dropdowns fresh over the session.
         if MODEL_REFRESH_MIN > 0:
             self.root.after(MODEL_REFRESH_MIN * 60 * 1000, self._auto_refresh_models)
+
+        # System tray: run quietly in the background; start hidden when launched
+        # at login (Install Autostart.bat passes --minimized).
+        self._setup_tray()
+        if start_minimized:
+            if self._tray:
+                self.root.after(1200, self._minimize_to_tray_on_start)
+            else:
+                self.write("Started with --minimized, but no system tray is "
+                           "available — showing the window instead.")
 
     def _log_backend_status(self):
         """Print one clear backend line at startup so a misconfigured analysis
@@ -1444,10 +1454,10 @@ class RecorderApp:
         except Exception as e:
             self.write(f"Recovery skipped ({e}).")
 
-    def _on_close(self):
-        """Close cleanly: tell ffmpeg to finish the current chunk and signal the
-        workers to stop. Segments are crash-safe, so whatever the muxer doesn't
-        finish here is recovered on next launch."""
+    def _quit_app(self):
+        """Really exit: tell ffmpeg to finish the current chunk, signal the
+        workers, remove the tray icon, and close. Segments are crash-safe, so
+        anything the muxer doesn't finish here is recovered on next launch."""
         try:
             if self.proc is not None:
                 try:
@@ -1464,12 +1474,171 @@ class RecorderApp:
             if self.proc_stop_event:
                 self.proc_stop_event.set()
         finally:
+            if getattr(self, "_tray", None):
+                try:
+                    self._tray.stop()
+                except Exception:
+                    pass
             self.root.destroy()
+
+    def _on_close(self):
+        """The window's X button. With a tray icon, hide to the tray and keep
+        running (recording continues in the background); otherwise actually quit."""
+        if getattr(self, "_tray", None):
+            self._hide_to_tray()
+        else:
+            self._quit_app()
+
+    # ---- System tray (run minimized in the background) --------------------
+    def _tray_image(self, state):
+        """Status dot for the tray icon: red=recording, orange=processing, grey=idle."""
+        from PIL import Image, ImageDraw
+        colors = {"recording": (224, 64, 64), "processing": (235, 162, 40),
+                  "idle": (130, 140, 155)}
+        img = Image.new("RGBA", (64, 64), (0, 0, 0, 0))
+        ImageDraw.Draw(img).ellipse((10, 10, 54, 54), fill=colors.get(state, colors["idle"]))
+        return img
+
+    def _tray_state(self):
+        if self.proc is not None:
+            return "recording"
+        if self.processing:
+            return "processing"
+        return "idle"
+
+    def _tray_process_label(self, item=None):
+        n = getattr(self, "_pending_sessions", 0)
+        return f"Process recordings ({n})" if n else "Process recordings"
+
+    def _setup_tray(self):
+        """Create a system-tray icon (pystray) with a status tooltip + menu on a
+        background thread. Degrades gracefully to a normal window if pystray /
+        pillow aren't installed or no tray is available."""
+        self._tray = None
+        self._tray_ready = threading.Event()
+        self._tray_hint_shown = False
+        self._tray_state_cur = None
+        self._min_retries = 0
+        try:
+            import pystray
+            from PIL import Image  # noqa: F401
+        except Exception:
+            self.write("System tray needs 'pystray' + 'pillow' (pip install pystray "
+                       "pillow) — running with a normal window instead.")
+            return
+        try:
+            menu = pystray.Menu(
+                pystray.MenuItem("Open Recorder", self._tray_open, default=True),
+                pystray.MenuItem(
+                    lambda item: "Stop recording" if self.proc is not None
+                    else "Start recording", self._tray_toggle_record),
+                pystray.MenuItem(self._tray_process_label, self._tray_process),
+                pystray.MenuItem("Open dashboard", self._tray_dashboard),
+                pystray.Menu.SEPARATOR,
+                pystray.MenuItem("Quit", self._tray_quit),
+            )
+            self._tray = pystray.Icon("desktop_recorder", self._tray_image("idle"),
+                                      "Desktop Recorder", menu)
+
+            def _run():
+                try:
+                    self._tray.run(setup=lambda icon: (
+                        setattr(icon, "visible", True), self._tray_ready.set()))
+                except Exception as e:
+                    self._tray = None
+                    self.root.after(0, self.write, f"Tray icon stopped ({e}).")
+                    self.root.after(0, self._show_window)  # never leave it invisible
+
+            threading.Thread(target=_run, daemon=True).start()
+            self._schedule_tray_update()
+        except Exception as e:
+            self._tray = None
+            self.write(f"System tray unavailable ({e}); using a normal window.")
+
+    # Tray menu actions run on the pystray thread -> marshal onto the Tk thread.
+    def _tray_open(self, icon=None, item=None):
+        self.root.after(0, self._show_window)
+
+    def _tray_toggle_record(self, icon=None, item=None):
+        self.root.after(0, self.toggle_record)
+
+    def _tray_process(self, icon=None, item=None):
+        self.root.after(0, self.process_recordings)
+
+    def _tray_dashboard(self, icon=None, item=None):
+        self.root.after(0, self._open_dashboard)
+
+    def _tray_quit(self, icon=None, item=None):
+        self.root.after(0, self._quit_app)
+
+    def _show_window(self):
+        try:
+            self.root.deiconify()
+            self.root.state("normal")
+            self.root.lift()
+            self.root.focus_force()
+        except Exception:
+            pass
+
+    def _hide_to_tray(self):
+        try:
+            self.root.withdraw()
+        except Exception:
+            return
+        if self._tray and not self._tray_hint_shown:
+            self._tray_hint_shown = True
+            try:
+                self._tray.notify("Still running in the background. Right-click the "
+                                  "tray icon to open it again or quit.", "Desktop Recorder")
+            except Exception:
+                pass
+
+    def _minimize_to_tray_on_start(self):
+        """Hide to the tray at launch, but only once the icon is actually up — so a
+        tray that fails to appear never leaves the app invisible."""
+        if not self._tray:
+            return
+        if self._tray_ready.is_set():
+            self.root.withdraw()
+            return
+        self._min_retries += 1
+        if self._min_retries < 8:
+            self.root.after(700, self._minimize_to_tray_on_start)
+        # else: give up and leave the window visible (safer than invisible)
+
+    def _schedule_tray_update(self):
+        if not self._tray:
+            return
+        try:
+            self._update_tray()
+        finally:
+            self.root.after(1500, self._schedule_tray_update)
+
+    def _update_tray(self):
+        if not self._tray:
+            return
+        if self.proc is not None and self.start_time:
+            el = int(time.time() - self.start_time)
+            title = f"Desktop Recorder — recording {el // 60:02d}:{el % 60:02d}"
+        elif self.processing:
+            title = "Desktop Recorder — processing…"
+        else:
+            n = getattr(self, "_pending_sessions", 0)
+            title = "Desktop Recorder — idle" + (f" · {n} to process" if n else "")
+        try:
+            self._tray.title = title
+            state = self._tray_state()
+            if state != self._tray_state_cur:
+                self._tray_state_cur = state
+                self._tray.icon = self._tray_image(state)
+        except Exception:
+            pass
 
 
 def main():
     root = tk.Tk()
-    RecorderApp(root)
+    minimized = any(a in ("--minimized", "--tray") for a in sys.argv[1:])
+    RecorderApp(root, start_minimized=minimized)
     root.mainloop()
 
 

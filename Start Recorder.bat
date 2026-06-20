@@ -12,8 +12,9 @@ rem failing silently behind the windowless GUI launch.
 python.exe -c "import recorder_app" 2>"%TEMP%\recorder_launch_error.txt"
 if errorlevel 1 goto failed
 
-rem All good - launch the GUI with no console window.
-start "" pythonw.exe "%~dp0recorder_app.py"
+rem All good - launch the GUI with no console window. Any args (e.g. --minimized,
+rem used by Install Autostart.bat) are forwarded to the app.
+start "" pythonw.exe "%~dp0recorder_app.py" %*
 exit /b 0
 
 :failed

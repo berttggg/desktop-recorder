@@ -13,5 +13,9 @@ faster-whisper
 fastembed
 numpy
 
+# System-tray icon (run minimized in the background)
+pystray
+pillow
+
 # Note: ffmpeg/ffprobe must be on PATH or placed in ./ffmpeg/.
 # The GUI uses tkinter (bundled with Python). Python 3.10+ recommended.

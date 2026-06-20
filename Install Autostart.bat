@@ -7,7 +7,7 @@ rem  Run "Uninstall Autostart.bat" to turn this off.
 rem ============================================================
 set "STARTUP=%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup"
 set "VBS=%STARTUP%\DesktopRecorder.vbs"
-> "%VBS%" echo CreateObject("WScript.Shell").Run """%~dp0Start Recorder.bat""", 0, False
+> "%VBS%" echo CreateObject("WScript.Shell").Run """%~dp0Start Recorder.bat"" --minimized", 0, False
 if exist "%VBS%" (
   echo Done. Desktop Recorder will now start automatically when you log in.
   echo Launcher created at:
