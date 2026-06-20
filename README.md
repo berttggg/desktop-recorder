@@ -30,6 +30,10 @@ of thought, and can answer "what was I working on last Tuesday afternoon?" by
 - **Survives a shutdown** — if your laptop dies (or you close the app) mid-record
   or mid-process, you don't lose your day: finished segments are safe on disk and
   processing resumes exactly where it left off.
+- **Survives sleep / lid-close** — Windows screen capture freezes across a
+  sleep and won't recover on its own, so the app detects the wake and
+  automatically restarts capture as a fresh session — your work after you reopen
+  the lid is recorded for real, not saved as a frozen frame.
 - **Stays running through hiccups** — automatic model failover means if a model is
   overloaded or its free quota runs out, it transparently switches to another and
   keeps going.

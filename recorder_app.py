@@ -81,6 +81,13 @@ MUX_POLL_SECONDS = float(os.environ.get("RECORDER_MUX_POLL_SECONDS", "2"))
 # so the dropdowns stay current as Google adds/removes models. 0 disables.
 MODEL_REFRESH_MIN = int(os.environ.get("RECORDER_MODEL_REFRESH_MIN", "30"))
 
+# Lid-close / sleep recovery. ffmpeg's screen capture (gdigrab) freezes across a
+# sleep/resume and never recovers, so a watchdog notices the wall-clock jump
+# (Tk timers don't fire while asleep) and restarts capture as a fresh session.
+# A gap larger than this, between ~5s watchdog ticks, means the machine slept.
+SLEEP_GAP_SECONDS = float(os.environ.get("RECORDER_SLEEP_GAP_SECONDS", "60"))
+WATCHDOG_POLL_MS = 5000
+
 
 def _default_rec_dir():
     # Keep large recordings off the (nearly full) C: drive.
@@ -502,6 +509,12 @@ class RecorderApp:
             else:
                 self.write("Started with --minimized, but no system tray is "
                            "available — showing the window instead.")
+
+        # Watchdog: catch wake-from-sleep (screen capture freezes across it) and
+        # restart recording so it doesn't silently keep saving a frozen frame.
+        self._recovering = False
+        self._watchdog_last = time.time()
+        self.root.after(WATCHDOG_POLL_MS, self._watchdog)
 
     def _log_backend_status(self):
         """Print one clear backend line at startup so a misconfigured analysis
@@ -1453,6 +1466,70 @@ class RecorderApp:
                     process.write_state(sd, recording=False)
         except Exception as e:
             self.write(f"Recovery skipped ({e}).")
+
+    # ---- Sleep / lid-close recovery ---------------------------------------
+    def _watchdog(self):
+        """Detect a wake from sleep. Tk's after() timers don't run while the
+        laptop is asleep, so a big jump between ticks means we just resumed —
+        and gdigrab freezes across sleep without recovering, so restart capture."""
+        now = time.time()
+        gap = now - getattr(self, "_watchdog_last", now)
+        self._watchdog_last = now
+        if (gap > SLEEP_GAP_SECONDS and self.proc is not None
+                and not getattr(self, "_recovering", False)):
+            self._recover_from_sleep(gap)
+        self.root.after(WATCHDOG_POLL_MS, self._watchdog)
+
+    def _recover_from_sleep(self, gap):
+        """Finalize the now-frozen recording and immediately start a fresh one, so
+        capture keeps working after the lid reopens. Runs as a new session."""
+        self._recovering = True
+        try:
+            self.write(f"Woke from sleep (~{int(gap // 60)} min gap) — screen "
+                       "capture freezes across sleep and won't recover, so I'm "
+                       "saving this recording and starting a fresh one.")
+            self.session_ended_iso = dt.datetime.now().isoformat(timespec="seconds")
+            try:
+                self.proc.terminate()       # 'q' won't flush a frozen capture
+                self.proc.wait(timeout=5)
+            except Exception:
+                pass
+            self.proc = None
+            if self.timer_job:
+                try:
+                    self.root.after_cancel(self.timer_job)
+                except Exception:
+                    pass
+                self.timer_job = None
+            # Finalize the old session off-thread with refs captured NOW, so the
+            # new recording started below can't clobber them.
+            threading.Thread(
+                target=self._finalize_session_async,
+                args=(self.session_dir, self.mux_thread, self.mux_stop_event,
+                      self.session_ended_iso), daemon=True).start()
+        finally:
+            self._recovering = False
+        self.start_record()             # fresh session for the post-wake activity
+
+    def _finalize_session_async(self, session_dir, mux_thread, mux_stop_event, ended_iso):
+        """Drain a session's muxer and mark it ready, off the GUI thread, using
+        refs captured at stop time. No UI resets — sleep recovery starts a new
+        recording right away, which owns the UI."""
+        log = lambda m: self.root.after(0, self.write, m)
+        try:
+            if mux_stop_event:
+                mux_stop_event.set()
+            if mux_thread:
+                mux_thread.join()
+            n = len(process.segments(session_dir)) if session_dir else 0
+            if session_dir:
+                process.write_state(session_dir, recording=False, ended=ended_iso)
+            base = os.path.basename(session_dir) if session_dir else "?"
+            log(f"Saved {n} segment(s) in {base}\\ (the part before sleep).")
+        except Exception as e:
+            log(f"Finalize error: {e}")
+        finally:
+            self.root.after(0, self._update_process_button)
 
     def _quit_app(self):
         """Really exit: tell ffmpeg to finish the current chunk, signal the
