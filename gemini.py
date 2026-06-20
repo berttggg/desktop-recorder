@@ -226,7 +226,43 @@ def _http_timeout():
     return httpx.Timeout(connect=20.0, read=300.0, write=600.0, pool=20.0)
 
 
+def _ssl_verify():
+    """What httpx should use to verify Google's TLS certificate.
+
+    Corporate VPNs / firewalls (Xgate, Zscaler, …) and some antivirus do HTTPS
+    inspection: they terminate TLS and re-sign it with their *own* root CA.
+    Browsers trust that CA because IT installed it in the Windows certificate
+    store, but Python ships its own bundle (certifi) and ignores the OS store, so
+    every upload fails with
+    ``CERTIFICATE_VERIFY_FAILED: self-signed certificate in certificate chain``.
+
+    Resolution (first that applies wins):
+      1. ``RECORDER_SSL_VERIFY`` = 0/false/no/off, or settings ``ssl_verify``
+         false -> verification OFF (INSECURE; last resort).
+      2. ``RECORDER_CA_BUNDLE`` env / settings ``ca_bundle`` -> use that PEM file.
+      3. ``truststore`` over the OS trust store -> trusts the same CAs the browser
+         already does (the usual fix for VPN/firewall HTTPS inspection).
+      4. otherwise -> default (certifi) verification.
+    """
+    s = _read_settings()
+    v = os.environ.get("RECORDER_SSL_VERIFY", "").strip().lower()
+    if v in ("0", "false", "no", "off") or s.get("ssl_verify") is False:
+        return False
+    ca = os.environ.get("RECORDER_CA_BUNDLE", "").strip()
+    if not ca and isinstance(s.get("ca_bundle"), str):
+        ca = s["ca_bundle"].strip()
+    if ca and os.path.isfile(ca):
+        return ca
+    try:
+        import ssl
+        import truststore
+        return truststore.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    except Exception:
+        return True
+
+
 _CLIENT = None
+_INSECURE_WARNED = False
 
 
 def _client():
@@ -238,8 +274,17 @@ def _client():
         prox = proxy_url()
         if prox:
             args["proxy"] = prox
+        verify = _ssl_verify()
+        args["verify"] = verify
+        if verify is False:
+            global _INSECURE_WARNED
+            if not _INSECURE_WARNED:
+                _INSECURE_WARNED = True
+                print("[gemini] WARNING: TLS certificate verification is DISABLED "
+                      "(RECORDER_SSL_VERIFY=0) — uploads are not protected against "
+                      "interception.", flush=True)
         # client_args flow straight to the underlying httpx client; setting both
-        # sync + async keeps a future async path on the same proxy/timeout.
+        # sync + async keeps a future async path on the same proxy/timeout/verify.
         http_options = types.HttpOptions(client_args=args,
                                          async_client_args=dict(args))
         _CLIENT = genai.Client(api_key=_api_key(), http_options=http_options)
@@ -523,14 +568,35 @@ def _upload_active(client, path, log):
 _NET_WARNED = False
 
 
-def _warn_network_blocked(log):
-    """Print one clear, actionable hint when every upload fails — almost always
-    the network can't reach Google, not a bug in the recorder. Guarded so live
-    mode doesn't repeat it every chunk."""
+def _is_cert_error(e):
+    """True for a TLS trust failure — the hallmark of a VPN/firewall doing HTTPS
+    inspection with its own root CA (vs. the network simply being unreachable)."""
+    s = str(e)
+    return ("CERTIFICATE_VERIFY_FAILED" in s
+            or "certificate verify failed" in s.lower()
+            or "self-signed certificate" in s
+            or "self signed certificate" in s)
+
+
+def _warn_network_blocked(log, err=None):
+    """Print one clear, actionable hint when every upload fails. A TLS trust
+    error (HTTPS inspection) gets cert-specific advice; otherwise it's almost
+    always the network not reaching Google. Guarded so live mode doesn't repeat
+    it every chunk."""
     global _NET_WARNED
     if _NET_WARNED:
         return
     _NET_WARNED = True
+    if _is_cert_error(err):
+        log("  ! Every upload failed TLS verification (self-signed certificate "
+            "in chain). Your VPN/firewall is inspecting HTTPS and presenting its "
+            "own certificate. Fix: let the recorder trust the Windows certificate "
+            "store (which your browser already uses) by installing it once —  "
+            "pip install truststore  — then restart; no other setup needed. "
+            "Or point RECORDER_CA_BUNDLE at your corporate root-CA .pem. Last "
+            "resort:  setx RECORDER_SSL_VERIFY 0  (disables certificate checking "
+            "— insecure).")
+        return
     prox = proxy_url()
     if prox:
         log(f"  ! Every upload to Google failed even via the proxy ({prox}). "
@@ -748,6 +814,7 @@ def analyze_one(seg, base, ffmpeg, log=print, client=None, thumbdir=None):
     blocks, transcript = [], []
     tidx = 0
     upload_fails = 0
+    last_upload_err = None
     for wi, (w0, w1) in enumerate(wins):
         # We always upload a lightweight proxy (low-fps, mono audio), never the
         # full-res original — see _make_upload_clip. For a multi-window segment
@@ -768,6 +835,7 @@ def analyze_one(seg, base, ffmpeg, log=print, client=None, thumbdir=None):
             f = _upload_active(client, upload_path, log)
         except Exception as e:
             upload_fails += 1
+            last_upload_err = e
             log(f"  upload failed for {os.path.basename(upload_path)}: {e}; skipping.")
             _safe_rm(upload_path)
             continue
@@ -803,7 +871,7 @@ def analyze_one(seg, base, ffmpeg, log=print, client=None, thumbdir=None):
             _safe_rm(upload_path)  # the proxy was a temp file
 
     if wins and upload_fails == len(wins):
-        _warn_network_blocked(log)
+        _warn_network_blocked(log, last_upload_err)
 
     blocks.sort(key=lambda b: b["t0"])
     transcript.sort(key=lambda t: t[0])

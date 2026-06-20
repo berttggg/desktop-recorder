@@ -1,6 +1,7 @@
 # Core analysis backends
 anthropic            # Claude backend (ANALYSIS_BACKEND=claude)
 google-genai>=1.15   # Gemini native-video backend (ANALYSIS_BACKEND=gemini)
+truststore           # trust the OS cert store (corporate VPN/firewall HTTPS inspection)
 
 # Audio capture (system loopback + mic) on Windows
 pyaudiowpatch

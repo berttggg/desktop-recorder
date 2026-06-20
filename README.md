@@ -146,6 +146,34 @@ proxy/VPN:
 Uploads also now **retry with backoff** and fail fast on a dead connection
 instead of hanging, so a brief network blip no longer loses a whole chunk.
 
+**Every upload fails with "CERTIFICATE_VERIFY_FAILED / self-signed certificate
+in certificate chain."** This is *different* from the errors above — the
+connection reaches Google fine, but a corporate VPN/firewall (e.g. Xgate,
+Zscaler) or antivirus is **inspecting HTTPS**: it terminates the TLS connection
+and re-signs it with its own root certificate. Your browser trusts that
+certificate because IT installed it in the **Windows certificate store**, but
+Python ships its own separate trust list (`certifi`) and ignores the OS store,
+so it rejects the certificate. The fix is to let the recorder trust the same
+store your browser does:
+
+```
+pip install truststore
+```
+
+Then restart the recorder — uploads will trust the OS certificate store (which
+already contains the corporate CA), whether or not inspection is active at the
+moment. It's in `requirements.txt`, so a fresh `pip install -r requirements.txt`
+covers it too. If for some reason the CA isn't in the Windows store, point the
+recorder at the corporate root-CA `.pem` directly:
+
+```
+setx RECORDER_CA_BUNDLE C:\path\to\corp-root-ca.pem
+```
+
+As a last resort you can disable certificate checking entirely with
+`setx RECORDER_SSL_VERIFY 0` (and restart) — but this turns off protection
+against interception, so only use it if nothing else works.
+
 If you can't use a proxy, switch analysis to the **Claude** backend
 (`Use Claude.bat`) and keep embeddings on **Local** — that path doesn't touch
 Google at all.
