@@ -311,12 +311,31 @@ class RecorderApp:
                                             command=self._refresh_models)
         self.model_refresh_btn.grid(row=1, column=2, sticky="w", padx=(0, 10), pady=(0, 10))
         self._applied_model = default_model
-        if os.environ.get("ANALYSIS_BACKEND", "claude").strip().lower() != "gemini":
+
+        # ---- Fallback model (tried when the main model is busy / quota'd) -
+        ttk.Label(ana, text="Fallback model:").grid(row=2, column=0, sticky="w",
+                                                    padx=(10, 4), pady=(0, 10))
+        self.model_fallback_var = tk.StringVar(value=self._fallback_model_label())
+        self.model_fallback_combo = ttk.Combobox(
+            ana, textvariable=self.model_fallback_var,
+            values=self._fallback_model_values(model_values))
+        self.model_fallback_combo.grid(row=2, column=1, columnspan=2, sticky="we",
+                                       padx=(4, 10), pady=(0, 10))
+        self.model_fallback_combo.bind("<<ComboboxSelected>>", self._apply_fallback_model)
+        self.model_fallback_combo.bind("<Return>", self._apply_fallback_model)
+        self.model_fallback_combo.bind("<FocusOut>", self._apply_fallback_model)
+        self._applied_fallback_model = self.model_fallback_var.get()
+
+        _is_gem = os.environ.get("ANALYSIS_BACKEND", "claude").strip().lower() == "gemini"
+        if not _is_gem:
             self.model_combo.config(state="disabled")
             self.model_refresh_btn.config(state="disabled")
-        elif saved:
-            # An explicit prior in-app choice wins over the import-time default.
-            self._apply_model(announce=False, force=True)
+            self.model_fallback_combo.config(state="disabled")
+        else:
+            if saved:
+                # An explicit prior in-app choice wins over the import-time default.
+                self._apply_model(announce=False, force=True)
+            self._apply_fallback_model(announce=False, force=True)
 
         # ---- Embedding (semantic-search) backend -------------------------
         # Independent of the analysis backend: you can analyze with Claude or
@@ -330,24 +349,39 @@ class RecorderApp:
         embed_values = self._build_embed_options(cur_backend=_eb, cur_model=_em)
         default_embed = self._embed_label_for(_eb, _em)
 
-        ttk.Label(ana, text="Embedding:").grid(row=2, column=0, sticky="w",
+        ttk.Label(ana, text="Embedding:").grid(row=3, column=0, sticky="w",
                                                padx=(10, 4), pady=(0, 10))
         self.embed_var = tk.StringVar(value=default_embed)
         self.embed_combo = ttk.Combobox(ana, textvariable=self.embed_var,
                                         values=embed_values, state="readonly")
-        self.embed_combo.grid(row=2, column=1, sticky="we", padx=(4, 4), pady=(0, 10))
+        self.embed_combo.grid(row=3, column=1, sticky="we", padx=(4, 4), pady=(0, 10))
         self.embed_combo.bind("<<ComboboxSelected>>", self._apply_embed)
         self.embed_refresh_btn = ttk.Button(ana, text="↻", width=3,
                                             command=self._refresh_embed_models)
-        self.embed_refresh_btn.grid(row=2, column=2, sticky="w", padx=(0, 10), pady=(0, 10))
+        self.embed_refresh_btn.grid(row=3, column=2, sticky="w", padx=(0, 10), pady=(0, 10))
         self._applied_embed = default_embed
 
+        # ---- Embedding fallback (used only with the Gemini embedding backend)
+        ttk.Label(ana, text="Embedding fallback:").grid(row=4, column=0, sticky="w",
+                                                        padx=(10, 4), pady=(0, 10))
+        self.embed_fallback_var = tk.StringVar(value=self._embed_fallback_label())
+        self.embed_fallback_combo = ttk.Combobox(
+            ana, textvariable=self.embed_fallback_var,
+            values=self._embed_fallback_values())
+        self.embed_fallback_combo.grid(row=4, column=1, columnspan=2, sticky="we",
+                                       padx=(4, 10), pady=(0, 10))
+        self.embed_fallback_combo.bind("<<ComboboxSelected>>", self._apply_embed_fallback)
+        self.embed_fallback_combo.bind("<Return>", self._apply_embed_fallback)
+        self.embed_fallback_combo.bind("<FocusOut>", self._apply_embed_fallback)
+        self._applied_embed_fallback = self.embed_fallback_var.get()
+        self._apply_embed_fallback(announce=False, force=True)
+
         # ---- Proxy (reach Google through a local VPN/proxy) ---------------
-        ttk.Label(ana, text="Proxy:").grid(row=3, column=0, sticky="w",
+        ttk.Label(ana, text="Proxy:").grid(row=5, column=0, sticky="w",
                                            padx=(10, 4), pady=(0, 10))
         self.proxy_var = tk.StringVar(value=str(self._settings.get("proxy", "") or ""))
         self.proxy_entry = ttk.Entry(ana, textvariable=self.proxy_var)
-        self.proxy_entry.grid(row=3, column=1, columnspan=2, sticky="we",
+        self.proxy_entry.grid(row=5, column=1, columnspan=2, sticky="we",
                               padx=(4, 10), pady=(0, 10))
         self.proxy_entry.bind("<Return>", self._apply_proxy)
         self.proxy_entry.bind("<FocusOut>", self._apply_proxy)
@@ -396,12 +430,17 @@ class RecorderApp:
                  "(even mid-recording) and is remembered. You can also type any model name.")
         _ToolTip(self.model_refresh_btn, "Refresh this list from Google — pulls every model your "
                  "key can use right now (including new ones). Needs an internet connection.")
+        _ToolTip(self.model_fallback_combo, "Model to switch to when the main model is overloaded "
+                 "(503) or its free daily quota is used up (429). '(automatic)' uses the "
+                 "built-in cheap-first chain. Applies right away and is remembered.")
         _ToolTip(self.embed_combo, "How your knowledge base is embedded for semantic search. "
                  "'Local' runs on your machine (offline, free, private). 'Gemini' is higher "
                  "quality but sends your KB text and search queries to Google (uses free-tier "
                  "quota). Switching re-embeds existing days automatically.")
         _ToolTip(self.embed_refresh_btn, "Refresh the Gemini embedding-model list from Google. "
                  "Needs a GEMINI_API_KEY and an internet connection.")
+        _ToolTip(self.embed_fallback_combo, "Gemini embedding model to fall back to if the main "
+                 "one fails (used only with the Gemini embedding backend). '(automatic)' = none.")
         _ToolTip(self.proxy_entry, "Optional. If this network can't reach Google directly "
                  "(uploads fail with 'connection timed out' / 'forbidden'), enter a local "
                  "proxy or VPN address such as http://127.0.0.1:7890. It's used for all "
@@ -525,7 +564,7 @@ class RecorderApp:
         for w, s in ((self.audio_combo, combo), (self.mic_refresh_btn, st),
                      (self.fps_spin, st), (self.sysaudio_chk, st),
                      (self.embed_combo, combo), (self.embed_refresh_btn, st),
-                     (self.proxy_entry, st)):
+                     (self.embed_fallback_combo, st), (self.proxy_entry, st)):
             try:
                 w.config(state=s)
             except Exception:
@@ -563,6 +602,45 @@ class RecorderApp:
         if announce:
             self.write(f"Gemini analysis model → {model}.")
         self._update_backend_badge()
+
+    # ---- Fallback model (failover target) ---------------------------------
+    def _fallback_model_label(self):
+        v = (self._settings.get("gemini_fallback_model") or "").strip()
+        return v or self._AUTO_FALLBACK
+
+    def _fallback_model_values(self, model_values):
+        vals = [self._AUTO_FALLBACK]
+        for m in (model_values or []):
+            if m and m not in vals:
+                vals.append(m)
+        return vals
+
+    def _apply_fallback_model(self, *_args, announce=True, force=False):
+        """Push the chosen fallback model into the backend. '(automatic)' clears
+        it (use the built-in failover chain). Remembered across restarts."""
+        label = (self.model_fallback_var.get() or "").strip()
+        if not force and label == getattr(self, "_applied_fallback_model", None):
+            return
+        model = "" if (not label or label == self._AUTO_FALLBACK) else label
+        try:
+            import gemini
+            gemini.set_fallback_model(model)
+        except Exception as e:
+            if announce:
+                self.write(f"Couldn't set fallback model: {e}")
+            return
+        self._applied_fallback_model = label
+        if model:
+            self._settings["gemini_fallback_model"] = model
+        else:
+            self._settings.pop("gemini_fallback_model", None)
+        _save_settings(self._settings)
+        if announce:
+            if model:
+                self.write(f"Fallback model → {model} (used when the main model is "
+                           "overloaded or its daily quota is spent).")
+            else:
+                self.write("Fallback model → automatic (built-in failover chain).")
 
     def _refresh_models(self, announce=True, initial=False):
         """Pull the list of models the key can actually use from Google and
@@ -607,8 +685,15 @@ class RecorderApp:
         if current and current not in values:   # keep a typed/custom choice visible
             values = [current] + values
         self.model_combo["values"] = values
+        try:    # keep the fallback dropdown offering the same models
+            self.model_fallback_combo["values"] = self._fallback_model_values(values)
+        except Exception:
+            pass
         if announce:
             self.write(f"Found {len(models)} model(s) available to your key.")
+
+    # Dropdown sentinel meaning "no explicit fallback — use the built-in chain".
+    _AUTO_FALLBACK = "(automatic)"
 
     # ---- Embedding (semantic-search) backend ------------------------------
     _LOCAL_EMBED_LABEL = "Local · bge-small-en-v1.5 (offline)"
@@ -690,6 +775,50 @@ class RecorderApp:
                 self.write(f"Embedding → {label}.  Runs on-device; nothing leaves "
                            "your machine.")
             self._reindex_async()
+
+    def _embed_fallback_label(self):
+        v = (self._settings.get("embed_gemini_fallback_model") or "").strip()
+        return v or self._AUTO_FALLBACK
+
+    def _embed_fallback_values(self, gmodels=None):
+        if gmodels is None:
+            try:
+                import gemini
+                gmodels = list(getattr(gemini, "KNOWN_EMBED_MODELS", []))
+            except Exception:
+                gmodels = ["gemini-embedding-001"]
+        vals = [self._AUTO_FALLBACK]
+        for m in gmodels:
+            if m and m not in vals:
+                vals.append(m)
+        return vals
+
+    def _apply_embed_fallback(self, *_args, announce=True, force=False):
+        """Set the Gemini *embedding* fallback model. '(automatic)' = none. Only
+        used when the embedding backend is Gemini. Remembered across restarts."""
+        label = (self.embed_fallback_var.get() or "").strip()
+        if not force and label == getattr(self, "_applied_embed_fallback", None):
+            return
+        model = "" if (not label or label == self._AUTO_FALLBACK) else label
+        try:
+            import embed
+            embed.set_gemini_fallback(model)
+        except Exception as e:
+            if announce:
+                self.write(f"Couldn't set embedding fallback: {e}")
+            return
+        self._applied_embed_fallback = label
+        if model:
+            self._settings["embed_gemini_fallback_model"] = model
+        else:
+            self._settings.pop("embed_gemini_fallback_model", None)
+        _save_settings(self._settings)
+        if announce:
+            if model:
+                self.write(f"Embedding fallback → {model} (used if the main Gemini "
+                           "embedding model fails).")
+            else:
+                self.write("Embedding fallback → none.")
 
     def _apply_proxy(self, event=None):
         """Persist the proxy address and rebuild the Gemini client so it takes
@@ -788,6 +917,10 @@ class RecorderApp:
         opts = self._build_embed_options(gmodels=models, cur_backend=cur_backend,
                                          cur_model=cur_model)
         self.embed_combo["values"] = opts
+        try:    # keep the embedding-fallback dropdown in sync
+            self.embed_fallback_combo["values"] = self._embed_fallback_values(models)
+        except Exception:
+            pass
         if announce:
             self.write(f"Found {len(models)} embedding model(s) available to your key.")
 

@@ -53,6 +53,12 @@ import analyze
 MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
 REDUCE_MODEL = os.environ.get("GEMINI_REDUCE_MODEL", MODEL)
 
+# Model to fail over to FIRST when the primary is overloaded (503) or its daily
+# free quota is spent (429). "" means use the built-in automatic chain
+# (FAILOVER_MODELS). Set it in the GUI ("Fallback model") or via
+# GEMINI_FALLBACK_MODEL; the GUI choice is applied at startup via set_fallback_model.
+FALLBACK_MODEL = os.environ.get("GEMINI_FALLBACK_MODEL", "").strip()
+
 # Free-tier-friendly, video-capable models (fastest/cheapest first). The recorder
 # UI offers these in a dropdown — handy when one model's daily quota is used up —
 # and you can type any other model name too. Daily free limits differ per model
@@ -81,6 +87,14 @@ def set_model(model, reduce_model=None):
         return
     MODEL = model
     REDUCE_MODEL = (reduce_model or model).strip()
+
+
+def set_fallback_model(model):
+    """Set the model to try FIRST when the primary fails (503 overload / 429
+    quota). ``""``/None restores the built-in automatic failover chain. Safe to
+    call from the GUI thread — just a string swap read at the next failure."""
+    global FALLBACK_MODEL
+    FALLBACK_MODEL = (model or "").strip()
 
 # Seconds of footage per request. ~15 min at media_resolution LOW is far under
 # the free-tier 250K tokens/minute ceiling while keeping few requests per hour.
@@ -682,10 +696,20 @@ def _is_quota(msg):
 
 
 def _failover_chain(model):
-    """The chosen model first, then the cheaper fallbacks (minus itself)."""
-    if not AUTO_FAILOVER:
-        return [model]
-    return [model] + [m for m in FAILOVER_MODELS if m != model]
+    """Order of models to try: the chosen one first, then a user-set
+    FALLBACK_MODEL (from the GUI), then — if AUTO_FAILOVER is on — the built-in
+    cheap-first safety net. With neither set, it's just the chosen model.
+
+    A user-set fallback works even when AUTO_FAILOVER is off: choosing one is an
+    explicit opt-in to failover."""
+    chain = [model]
+    if FALLBACK_MODEL and FALLBACK_MODEL != model:
+        chain.append(FALLBACK_MODEL)
+    if AUTO_FAILOVER:
+        for m in FAILOVER_MODELS:
+            if m not in chain:
+                chain.append(m)
+    return chain
 
 
 def _persist_model(old, new, log):

@@ -49,7 +49,10 @@ of thought, and can answer "what was I working on last Tuesday afternoon?" by
   re-upload, a failed upload simply retries next time, and a failed run never
   overwrites your previous good report.
 - **Automatic model failover** (Gemini): if a model is overloaded (503) or its
-  free daily quota is exhausted (429), it transparently switches to another.
+  free daily quota is exhausted (429), it transparently switches to another. You
+  can pick the **Fallback model** to switch to in the GUI (or leave it on
+  *(automatic)* for the built-in cheap-first chain), and an **Embedding
+  fallback** for the Gemini embedding backend.
 - **Live model discovery**: the model picker is populated from the API, so newly
   released models show up automatically.
 - **Knowledge base dashboard**: a local web UI to browse past days and search

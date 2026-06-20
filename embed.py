@@ -77,6 +77,10 @@ def _cfg(env_key, settings_key, default):
 BACKEND = str(_cfg("RECORDER_EMBED_BACKEND", "embed_backend", "local")).lower()
 LOCAL_MODEL = _cfg("RECORDER_EMBED_MODEL", "embed_local_model", DEFAULT_LOCAL_MODEL)
 GEMINI_MODEL = _cfg("RECORDER_GEMINI_EMBED_MODEL", "embed_gemini_model", DEFAULT_GEMINI_MODEL)
+# Gemini embedding model to fall back to when the primary fails (429/503/
+# unavailable). "" disables embedding failover. GUI "Embedding fallback" /
+# RECORDER_GEMINI_EMBED_FALLBACK.
+GEMINI_FALLBACK_MODEL = _cfg("RECORDER_GEMINI_EMBED_FALLBACK", "embed_gemini_fallback_model", "")
 try:
     GEMINI_DIM = int(_cfg("RECORDER_GEMINI_EMBED_DIM", "embed_gemini_dim", DEFAULT_GEMINI_DIM))
 except (TypeError, ValueError):
@@ -113,6 +117,14 @@ def set_backend(backend=None, model=None, dim=None):
             pass
     _MODEL = None
     _MODEL_KEY = None
+
+
+def set_gemini_fallback(model):
+    """Set the Gemini embedding model to fall back to when the primary fails
+    (429/503/unavailable). ``""``/None disables embedding failover. Live + GUI-
+    thread safe; read at the next embed call."""
+    global GEMINI_FALLBACK_MODEL
+    GEMINI_FALLBACK_MODEL = (model or "").strip()
 
 
 def current():
@@ -202,31 +214,41 @@ def _gemini_embed(texts, task_type):
     if GEMINI_DIM:
         cfg.output_dimensionality = GEMINI_DIM
 
+    # Try the primary embedding model, then the user's fallback (if set). Same
+    # output_dimensionality is requested for both, so stored vectors stay a
+    # consistent dimension regardless of which model answered.
+    models = [GEMINI_MODEL]
+    if GEMINI_FALLBACK_MODEL and GEMINI_FALLBACK_MODEL != GEMINI_MODEL:
+        models.append(GEMINI_FALLBACK_MODEL)
+
     out = []
     for i in range(0, len(texts), _GEMINI_BATCH):
         batch = [t[:_GEMINI_MAX_CHARS] for t in texts[i:i + _GEMINI_BATCH]]
-        last = None
-        for attempt in range(3):
-            try:
-                resp = client.models.embed_content(
-                    model=GEMINI_MODEL, contents=batch, config=cfg)
-                for e in resp.embeddings:
-                    out.append(np.asarray(e.values, dtype="float32"))
-                last = None
-                break
-            except Exception as e:  # noqa: BLE001
-                last = e
-                retry = False
+        vecs, last = None, None
+        for model in models:
+            for attempt in range(3):
                 try:
-                    retry = gemini._retryable(str(e))
-                except Exception:
+                    resp = client.models.embed_content(
+                        model=model, contents=batch, config=cfg)
+                    vecs = [np.asarray(e.values, dtype="float32")
+                            for e in resp.embeddings]
+                    break
+                except Exception as e:  # noqa: BLE001
+                    last = e
                     retry = False
-                if attempt < 2 and retry:
-                    time.sleep(2 * (attempt + 1))
-                    continue
-                raise
-        if last is not None:
-            raise last
+                    try:
+                        retry = gemini._retryable(str(e))
+                    except Exception:
+                        retry = False
+                    if attempt < 2 and retry:
+                        time.sleep(2 * (attempt + 1))
+                        continue
+                    break   # out of retries (or non-retryable) — try next model
+            if vecs is not None:
+                break
+        if vecs is None:
+            raise last if last is not None else RuntimeError("embedding failed")
+        out.extend(vecs)
     return out
 
 
