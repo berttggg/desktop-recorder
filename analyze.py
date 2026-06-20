@@ -34,6 +34,34 @@ def fmt_clock(sec):
     return f"{h:d}:{m:02d}:{s:02d}" if h else f"{m:02d}:{s:02d}"
 
 
+def atomic_write_text(path, text, encoding="utf-8"):
+    """Write ``text`` to ``path`` atomically: a temp file in the same directory
+    is flushed + fsynced, then ``os.replace``'d over the target. A crash (or a
+    laptop shutdown) leaves either the intact old file or the complete new one —
+    never a half-written file. Used for checkpoints, insights.json and reports so
+    processing survives being interrupted at any moment."""
+    d = os.path.dirname(os.path.abspath(path))
+    os.makedirs(d, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=d, prefix=".tmp_", suffix=".part")
+    try:
+        with os.fdopen(fd, "w", encoding=encoding) as f:
+            f.write(text)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+    finally:
+        try:
+            if os.path.exists(tmp):
+                os.remove(tmp)
+        except Exception:
+            pass
+
+
+def atomic_write_json(path, obj):
+    """Atomically write ``obj`` as pretty UTF-8 JSON (see atomic_write_text)."""
+    atomic_write_text(path, json.dumps(obj, ensure_ascii=False, indent=2))
+
+
 # --------------------------------------------------------------------------
 # To-do hygiene (shared by insights.py and gemini.py reduce steps)
 #

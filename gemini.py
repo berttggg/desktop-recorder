@@ -788,15 +788,19 @@ def analyze_one(seg, base, ffmpeg, log=print, client=None, thumbdir=None):
 
     Uploads a lightweight proxy of the segment (see _make_upload_clip), issues
     windowed generate_content calls, and returns
-    ``(blocks, transcript, dur)`` with session-absolute times — every time is
+    ``(blocks, transcript, dur, ok)`` with session-absolute times — every time is
     offset by ``base`` (the segment's start position within the whole session),
     so a caller can run one finished chunk at a time and keep a running ``base``.
     Thumbnails go in ``thumbdir`` (defaults to ``_gem_thumbs`` beside the
     segment) and are named after the segment stem so they never collide across
-    chunks. Reused by both ``analyze_video`` (batch, at stop) and live mode.
+    chunks.
 
       blocks     -> [{t0,t1,thumb,activity,app,detail,todos}]
       transcript -> [(t0, t1, speech)]
+      ok         -> True if no upload failed (safe to checkpoint); False when a
+                    network upload failed, so the caller can leave the segment
+                    pending and retry it later. (Local proxy-build skips do NOT
+                    set ok=False — they would never self-heal on retry.)
     """
     client = client or _client()
     name = os.path.basename(seg)
@@ -875,7 +879,8 @@ def analyze_one(seg, base, ffmpeg, log=print, client=None, thumbdir=None):
 
     blocks.sort(key=lambda b: b["t0"])
     transcript.sort(key=lambda t: t[0])
-    return blocks, transcript, dur
+    ok = (upload_fails == 0)
+    return blocks, transcript, dur, ok
 
 
 def analyze_video(session_dir, ffmpeg, log=print):
@@ -901,8 +906,8 @@ def analyze_video(session_dir, ffmpeg, log=print):
     base = 0.0
 
     for seg in segs:
-        b, t, dur = analyze_one(seg, base, ffmpeg, log=log,
-                                client=client, thumbdir=thumbdir)
+        b, t, dur, _ok = analyze_one(seg, base, ffmpeg, log=log,
+                                     client=client, thumbdir=thumbdir)
         blocks += b
         transcript += t
         base += dur

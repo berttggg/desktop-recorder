@@ -374,13 +374,14 @@ def _finalize_and_report(session_dir, session_id, rec_dir, blocks, transcript,
     insights["time_breakdown"] = time_breakdown
     runs = _runs(blocks)
 
-    # transcript + insights files
+    # transcript + insights files — written atomically (temp + os.replace) so a
+    # shutdown mid-write can never corrupt the previous good copy.
     if transcript:
-        with open(os.path.join(session_dir, "transcript.txt"), "w", encoding="utf-8") as f:
-            f.write("\n".join(f"[{analyze.fmt_clock(s)}-{analyze.fmt_clock(e)}] {x}"
-                              for s, e, x in transcript))
-    with open(os.path.join(session_dir, "insights.json"), "w", encoding="utf-8") as f:
-        json.dump(insights, f, ensure_ascii=False, indent=2)
+        analyze.atomic_write_text(
+            os.path.join(session_dir, "transcript.txt"),
+            "\n".join(f"[{analyze.fmt_clock(s)}-{analyze.fmt_clock(e)}] {x}"
+                      for s, e, x in transcript))
+    analyze.atomic_write_json(os.path.join(session_dir, "insights.json"), insights)
 
     report = _render_session_report(session_dir, session_id, insights, runs,
                                     time_breakdown, transcript, total_dur, meta)
@@ -405,39 +406,20 @@ def _finalize_and_report(session_dir, session_id, rec_dir, blocks, transcript,
 
 
 # --------------------------------------------------------------------------
-# Live (during-recording) analysis
+# Finalize from per-segment blocks (used by the resumable batch processor)
 # --------------------------------------------------------------------------
-def analyze_chunk_live(seg, base, ffmpeg, log=print):
-    """Live per-chunk map: analyze ONE finalized segment with Gemini, returning
-    (blocks, transcript, dur) in session-absolute time (offset by ``base``, the
-    chunk's start within the session). Never raises — on any failure it returns
-    ([], [], measured_dur) so the caller can still advance its running base and
-    finalize the session afterwards."""
-    try:
-        import gemini
-        return gemini.analyze_one(seg, base, ffmpeg, log=log)
-    except Exception as e:
-        log(f"Live chunk analysis failed ({e}).")
-        dur = 0.0
-        try:
-            dur = analyze.get_duration(seg, ffmpeg) or 0.0
-        except Exception:
-            pass
-        return [], [], dur
+def finalize_from_blocks(session_dir, rec_dir, blocks, transcript, total_dur,
+                         meta=None, tmp_dirs=None, log=print):
+    """Synthesize + publish a session report from already-extracted blocks.
 
-
-def finalize_session_live(session_dir, rec_dir, blocks, transcript, total_dur,
-                          meta=None, tmp_dirs=None, log=print):
-    """Finish a session that was analyzed live, chunk by chunk, during recording.
-
-    ``blocks``/``transcript`` are the accumulated per-chunk results (already in
-    session-absolute time). Only the daily *reduce* (synthesis) runs here, plus
-    the report/KB/embeddings/dashboard steps — no video is re-read. The caller
-    should fall back to ``analyze_session`` when no blocks were collected.
-    Returns (report_path, summary)."""
+    ``blocks``/``transcript`` are the assembled per-segment results, already in
+    session-absolute time. Only the daily *reduce* (synthesis) runs here, plus
+    the report/KB/embeddings/dashboard steps — no video is re-read. All file
+    writes are atomic (see _finalize_and_report), so a previous good report
+    survives any interruption. Returns (report_path, summary)."""
     meta = meta or {}
     session_id = os.path.basename(session_dir.rstrip("\\/"))
-    log(f"Finalizing live session {session_id} ({len(blocks)} block(s))…")
+    log(f"Synthesizing {session_id} ({len(blocks)} block(s))…")
     try:
         import gemini
         insights = gemini.reduce(blocks, log=log)
@@ -666,8 +648,7 @@ def _render_session_report(session_dir, session_id, insights, runs, time_breakdo
 
     p.append("</div></body></html>")
     out = os.path.join(session_dir, "report.html")
-    with open(out, "w", encoding="utf-8") as f:
-        f.write("".join(p))
+    analyze.atomic_write_text(out, "".join(p))
     return out
 
 

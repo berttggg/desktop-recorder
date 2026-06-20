@@ -20,6 +20,7 @@ from tkinter import ttk, messagebox, scrolledtext
 import analyze
 import audio_capture
 import insights
+import process
 
 
 def _refresh_env_from_registry():
@@ -68,16 +69,14 @@ _refresh_env_from_registry()
 
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 
-# Long recordings are split into segments of this length (seconds). Each
-# session becomes a folder of seg_000.mp4, seg_001.mp4, … which the analyzer
-# stitches back into one timeline.
-SEGMENT_SECONDS = int(os.environ.get("RECORDER_SEGMENT_SECONDS", "3600"))
-
-# Live (during-recording) analysis: capture straight into short *finalized*
-# chunks so a background worker can analyze each one with Gemini while the next
-# records. Shorter than SEGMENT_SECONDS so feedback arrives while you work.
-LIVE_SEGMENT_SECONDS = int(os.environ.get("RECORDER_LIVE_SEGMENT_SECONDS", "600"))
-LIVE_POLL_SECONDS = float(os.environ.get("RECORDER_LIVE_POLL_SECONDS", "2"))
+# Recording always captures straight into short *finalized* chunks so every
+# completed seg_NNN.mp4 is a valid, analyzable file: a crash or shutdown can lose
+# at most the single chunk being written, never the whole session. Nothing is
+# uploaded during capture — the user processes accumulated recordings later with
+# the Process button (see process.py). Shorter chunks = less lost on a crash.
+CAPTURE_SEGMENT_SECONDS = int(os.environ.get("RECORDER_CAPTURE_SEGMENT_SECONDS", "600"))
+# How often the background muxer checks for a newly-finalized chunk to fold in.
+MUX_POLL_SECONDS = float(os.environ.get("RECORDER_MUX_POLL_SECONDS", "2"))
 
 
 def _default_rec_dir():
@@ -212,24 +211,24 @@ class RecorderApp:
         self.ffmpeg = find_ffmpeg()
         self.proc = None
         self.session_dir = None  # folder holding seg_*.mp4 for this session
-        self.tmpfile = None      # ffmpeg output (video + optional mic)
         self.has_mic = False
         self.sys_rec = None      # SystemAudioRecorder instance
-        self.sys_wav = None
         self.start_time = None
         self.timer_job = None
         self.session_started_iso = None
         self.session_ended_iso = None
-        self.live = False             # live during-recording analysis active?
-        self.live_thread = None       # background chunk mux+analyze worker
-        self.live_stop_event = None   # signals the worker to drain & finish
-        self._live = None             # accumulated {blocks,transcript,base,tmp_dirs}
+        self.mux_thread = None         # background chunk muxer (no upload)
+        self.mux_stop_event = None     # signals the muxer to drain & finish
+        self.processing = False        # a Process run is in progress
+        self.proc_stop_event = None    # signals the Process worker to stop (resumable)
+        self._pending_sessions = 0     # recordings awaiting Process (button label)
         self._settings = _load_settings()
         self._applied_model = None    # last Gemini model pushed into gemini.MODEL
 
         root.title("Desktop Recorder + Analyzer")
         root.geometry("700x620")
         root.minsize(620, 540)
+        root.protocol("WM_DELETE_WINDOW", self._on_close)
 
         try:
             ttk.Style().theme_use("vista")   # native look on Windows
@@ -292,11 +291,12 @@ class RecorderApp:
         ana.pack(fill="x", padx=14, pady=(0, 8))
         ana.columnconfigure(1, weight=1)
 
-        self.live_var = tk.BooleanVar(value=True)
-        self.live_chk = ttk.Checkbutton(
-            ana, text="Analyze while recording  (free Gemini backend)",
-            variable=self.live_var)
-        self.live_chk.grid(row=0, column=0, columnspan=2, sticky="w", padx=10, pady=(8, 4))
+        self.capture_note = ttk.Label(
+            ana, foreground="#888",
+            text="Recording only captures — nothing is uploaded until you click "
+                 "Process recordings.")
+        self.capture_note.grid(row=0, column=0, columnspan=3, sticky="w",
+                               padx=10, pady=(8, 4))
 
         ttk.Label(ana, text="Gemini model:").grid(row=1, column=0, sticky="w",
                                                   padx=(10, 4), pady=(0, 10))
@@ -358,9 +358,9 @@ class RecorderApp:
         btns.pack(fill="x", padx=14, pady=(0, 8))
         self.rec_btn = ttk.Button(btns, text="●  Start Recording", command=self.toggle_record)
         self.rec_btn.pack(side="left")
-        self.analyze_btn = ttk.Button(btns, text="Analyze last recording",
-                                      command=self.analyze_last, state="disabled")
-        self.analyze_btn.pack(side="left", padx=8)
+        self.process_btn = ttk.Button(btns, text="Process recordings",
+                                      command=self.process_recordings, state="disabled")
+        self.process_btn.pack(side="left", padx=8)
         self.dash_btn = ttk.Button(btns, text="Dashboard", command=self._open_dashboard)
         self.dash_btn.pack(side="left")
         self.open_btn = ttk.Button(btns, text="Open folder",
@@ -388,9 +388,9 @@ class RecorderApp:
                  "work and keeps files small.")
         _ToolTip(self.sysaudio_chk, "Also record system/desktop audio (loopback) — useful "
                  "for calls, videos and anything you hear.")
-        _ToolTip(self.live_chk, "Analyze each ~10-min chunk with Gemini while you record, so "
-                 "the day report is almost ready when you stop. Needs ANALYSIS_BACKEND=gemini "
-                 "and a GEMINI_API_KEY — run 'Use Gemini (free).bat', then reopen.")
+        _ToolTip(self.capture_note, "Recording writes crash-safe ~10-min segments to disk and "
+                 "uploads nothing. When you're ready (e.g. the VPN is up), click 'Process "
+                 "recordings' to analyze everything that's accumulated. Safe to do later.")
         _ToolTip(self.model_combo, "Which Gemini model analyzes your recording. If one model's "
                  "free daily quota runs out, switch to another here — it applies right away "
                  "(even mid-recording) and is remembered. You can also type any model name.")
@@ -408,7 +408,9 @@ class RecorderApp:
                  "Google calls (analysis, reduce, embeddings), applies right away, and is "
                  "remembered. A RECORDER_PROXY or HTTPS_PROXY environment variable, if set, "
                  "overrides this box.")
-        _ToolTip(self.analyze_btn, "Run AI analysis on the most recent recording and open the report.")
+        _ToolTip(self.process_btn, "Upload + analyze every recording not yet processed (across "
+                 "days). Resumable: each segment is saved as it finishes, so a crash/shutdown "
+                 "picks up where it left off, and failed uploads simply retry next time.")
         _ToolTip(self.dash_btn, "Open your cross-day knowledge base: summaries, to-dos and search.")
         _ToolTip(self.open_btn, "Open the folder where recordings and reports are saved.")
 
@@ -434,6 +436,12 @@ class RecorderApp:
         except Exception:
             pass
 
+        # Recover any session interrupted by a crash/shutdown, then show how many
+        # recordings are waiting to be processed on the Process button.
+        if self.ffmpeg:
+            self._recover_unfinished()
+        self._update_process_button()
+
     def _log_backend_status(self):
         """Print one clear backend line at startup so a misconfigured analysis
         backend is never silent. Distinguishes Gemini ready / no-key / no-SDK,
@@ -451,9 +459,13 @@ class RecorderApp:
 
         if backend == "gemini":
             if has_gem_key and gem_sdk:
-                live = "ON" if self.live_var.get() else "available (checkbox off)"
-                self.write(f"Backend: Gemini ({self._gemini_model()}) — free native "
-                           f"video analysis. Live during-recording analysis is {live}.")
+                try:
+                    import gemini
+                    model = gemini.MODEL
+                except Exception:
+                    model = "gemini"
+                self.write(f"Backend: Gemini ({model}) — free native video analysis. "
+                           "Recording captures only; click 'Process recordings' to analyze.")
             elif not has_gem_key:
                 self.write("Backend: Gemini selected, but no GEMINI_API_KEY found — "
                            "analysis will fall back to a basic local summary. Set the "
@@ -511,7 +523,7 @@ class RecorderApp:
         combo = "readonly" if enabled else "disabled"
         st = "normal" if enabled else "disabled"
         for w, s in ((self.audio_combo, combo), (self.mic_refresh_btn, st),
-                     (self.fps_spin, st), (self.sysaudio_chk, st), (self.live_chk, st),
+                     (self.fps_spin, st), (self.sysaudio_chk, st),
                      (self.embed_combo, combo), (self.embed_refresh_btn, st),
                      (self.proxy_entry, st)):
             try:
@@ -804,6 +816,10 @@ class RecorderApp:
     def start_record(self):
         if not self.ffmpeg:
             return
+        if self.processing:
+            messagebox.showinfo("Busy", "Please wait for processing to finish "
+                                "before starting a new recording.")
+            return
         try:
             fps = int(self.fps_var.get())
         except ValueError:
@@ -811,19 +827,11 @@ class RecorderApp:
         ts = dt.datetime.now().strftime("%Y%m%d_%H%M%S")
         self.session_dir = os.path.join(REC_DIR, f"session_{ts}")
         os.makedirs(self.session_dir, exist_ok=True)
-        self.tmpfile = os.path.join(self.session_dir, "_capture.mp4")
-        self.sys_wav = os.path.join(self.session_dir, "_sys.wav")
         self.session_started_iso = dt.datetime.now().isoformat(timespec="seconds")
         self.session_ended_iso = None
 
         audio = self.audio_var.get()
         self.has_mic = bool(audio and audio != "(no microphone)")
-
-        self.live = bool(self.live_var.get() and self._live_active())
-        if self.live_var.get() and not self.live:
-            self.write("Live analysis needs the Gemini backend + key "
-                       "(run \"Use Gemini (free).bat\" and set GEMINI_API_KEY); "
-                       "recording normally — you can Analyze afterward.")
 
         cmd = [
             self.ffmpeg, "-hide_banner", "-y",
@@ -833,20 +841,17 @@ class RecorderApp:
             cmd += ["-f", "dshow", "-i", f"audio={audio}"]
         cmd += [
             "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p",
-            # Keyframe at least every ~10s so the segment muxer can cut cleanly
-            # near each boundary (segments split only on keyframes).
+            # Keyframe at least every ~10s so segments cut cleanly on a keyframe.
             "-g", str(max(2, fps) * 10),
         ]
         if self.has_mic:
             cmd += ["-c:a", "aac", "-b:a", "128k"]
-        if self.live:
-            # Write straight into short *finalized* chunks (_vraw_000.mp4, …) so
-            # the worker can mux+analyze each one while the next records.
-            cmd += ["-f", "segment", "-segment_time", str(LIVE_SEGMENT_SECONDS),
-                    "-reset_timestamps", "1", "-segment_format", "mp4",
-                    os.path.join(self.session_dir, "_vraw_%03d.mp4")]
-        else:
-            cmd += [self.tmpfile]
+        # Always capture into short *finalized* chunks (_vraw_000.mp4, …); the
+        # muxer folds each into a complete, crash-safe seg_NNN.mp4. No upload
+        # happens here — the user runs Process later.
+        cmd += ["-f", "segment", "-segment_time", str(CAPTURE_SEGMENT_SECONDS),
+                "-reset_timestamps", "1", "-segment_format", "mp4",
+                os.path.join(self.session_dir, "_vraw_%03d.mp4")]
 
         try:
             self.proc = subprocess.Popen(
@@ -862,49 +867,45 @@ class RecorderApp:
         self.sys_rec = None
         if self.sysaudio_var.get():
             try:
-                first_wav = (os.path.join(self.session_dir, "_sraw_000.wav")
-                             if self.live else self.sys_wav)
-                self.sys_rec = audio_capture.SystemAudioRecorder(first_wav)
+                self.sys_rec = audio_capture.SystemAudioRecorder(
+                    os.path.join(self.session_dir, "_sraw_000.wav"))
                 self.sys_rec.start()
                 self.write("Capturing system audio (loopback).")
             except Exception as e:
                 self.sys_rec = None
                 self.write(f"System audio unavailable: {e}")
 
+        # state.json — the source of truth for "this session needs processing".
+        process.write_state(self.session_dir,
+                            started=self.session_started_iso, ended=None,
+                            recording=True, processed=False,
+                            has_mic=self.has_mic,
+                            sys_audio=bool(self.sys_rec is not None))
+
         self.start_time = time.time()
         self.rec_btn.config(text="■  Stop Recording")
-        self.analyze_btn.config(state="disabled")
+        self.process_btn.config(state="disabled")
         self._set_settings_enabled(False)
         self.status_lbl.config(foreground=_BUSY)
 
-        if self.live:
-            # Hand sys_rec to the worker — it owns rotation/stop from here on.
-            self._live = {"blocks": [], "transcript": [], "base": 0.0,
-                          "tmp_dirs": [os.path.join(self.session_dir, "_gem_thumbs")]}
-            self.live_stop_event = threading.Event()
-            self.live_thread = threading.Thread(
-                target=self._live_loop,
-                args=(self.session_dir, self.ffmpeg, self.has_mic,
-                      self.sys_rec, self.live_stop_event, self._live),
-                daemon=True)
-            self.live_thread.start()
-            self.write(f"Recording started → {os.path.basename(self.session_dir)}\\ "
-                       f"(live analysis every {LIVE_SEGMENT_SECONDS // 60} min "
-                       f"via Gemini {self._gemini_model()})")
-        else:
-            self.write(f"Recording started → {os.path.basename(self.session_dir)}\\ "
-                       f"(segments every {SEGMENT_SECONDS // 60} min)")
+        # Background muxer folds finalized chunks into seg_NNN.mp4 (no upload).
+        self.mux_stop_event = threading.Event()
+        self.mux_thread = threading.Thread(
+            target=self._mux_loop,
+            args=(self.session_dir, self.ffmpeg, self.has_mic,
+                  self.sys_rec, self.mux_stop_event),
+            daemon=True)
+        self.mux_thread.start()
+        self.write(f"Recording started → {os.path.basename(self.session_dir)}\\ "
+                   f"(crash-safe {CAPTURE_SEGMENT_SECONDS // 60}-min segments; "
+                   "click Process recordings later to analyze)")
         self._tick()
 
     def _tick(self):
         if self.proc is None:
             return
         elapsed = int(time.time() - self.start_time)
-        msg = f"● Recording   {elapsed // 60:02d}:{elapsed % 60:02d}"
-        if self.live and self._live is not None:
-            nb = len(self._live.get("blocks") or [])
-            msg += f"      live analysis: {nb} block(s) so far"
-        self.status.set(msg)
+        self.status.set(f"● Recording   {elapsed // 60:02d}:{elapsed % 60:02d}")
         self.timer_job = self.root.after(500, self._tick)
 
     def stop_record(self):
@@ -926,72 +927,39 @@ class RecorderApp:
         if self.timer_job:
             self.root.after_cancel(self.timer_job)
         self.rec_btn.config(text="●  Start Recording")
-
-        if self.live:
-            # The last _vraw chunk is now finalized; let the worker drain it.
-            # (The worker owns sys_rec — it stops the loopback itself.)
-            self.status_lbl.config(foreground=_INFO)
-            self.status.set("Finalizing…")
-            self._stop_live()
-            return
-
+        self.rec_btn.config(state="disabled")
         self.status_lbl.config(foreground=_INFO)
-        self.status.set("Saving…")
-        sys_ok = False
-        if self.sys_rec is not None:
-            try:
-                self.sys_rec.stop()
-                sys_ok = (os.path.isfile(self.sys_wav)
-                          and os.path.getsize(self.sys_wav) > 1000
-                          and self.sys_rec.error is None)
-                if not sys_ok:
-                    self.write("System audio produced no data — skipping it.")
-            except Exception as e:
-                self.write(f"System audio stop error: {e}")
-            self.sys_rec = None
+        self.status.set("Finalizing…")
+        # The last _vraw chunk is now finalized; drain the muxer on a background
+        # thread (it owns sys_rec and stops the loopback itself) so the GUI stays
+        # responsive. No upload happens — that's the Process button's job.
+        threading.Thread(target=self._drain_mux_worker, daemon=True).start()
 
-        self._finalize(sys_ok)
-        self.status_lbl.config(foreground=_OK)
-        self.status.set("Ready.")
-        self._set_settings_enabled(True)
-
-    def _finalize(self, sys_ok):
-        if not (self.tmpfile and os.path.isfile(self.tmpfile)):
-            self.write("Warning: capture file not found.")
-            return
-        self.write("Mixing system audio and splitting into segments…" if sys_ok
-                   else "Splitting recording into segments…")
-
-        n = self._segment(self.tmpfile, self.sys_wav, self.session_dir,
-                          self.has_mic, sys_ok)
-        if n:
-            for f in (self.tmpfile, self.sys_wav):
-                try:
-                    if os.path.isfile(f):
-                        os.remove(f)
-                except Exception:
-                    pass
-        else:
-            # Segmenting failed — keep the raw capture as the single segment so
-            # the session is still analyzable.
-            try:
-                os.replace(self.tmpfile, os.path.join(self.session_dir, "seg_000.mp4"))
-                self.write("Segmenting failed; kept the raw capture as seg_000.mp4.")
-            except Exception as e:
-                self.write(f"Finalize error: {e}")
-                return
-
-        segs = sorted(glob.glob(os.path.join(self.session_dir, "seg_*.mp4")))
-        if not segs:
-            self.write("Warning: no output segments found.")
-            return
-        size = sum(os.path.getsize(s) for s in segs) / 1e6
-        label = "video + mic + system audio" if (sys_ok and self.has_mic) else \
-                "video + system audio" if sys_ok else \
-                "video + mic" if self.has_mic else "video"
-        self.write(f"Saved {len(segs)} segment(s) in "
-                   f"{os.path.basename(self.session_dir)}\\ ({size:.1f} MB) [{label}]")
-        self.analyze_btn.config(state="normal")
+    def _drain_mux_worker(self):
+        """Wait for the muxer to fold in the final chunk(s), mark the session
+        ready to process, and refresh the Process button. Off the GUI thread."""
+        log = lambda m: self.root.after(0, self.write, m)
+        session_dir = self.session_dir
+        try:
+            if self.mux_stop_event:
+                self.mux_stop_event.set()
+            if self.mux_thread:
+                self.mux_thread.join()
+            n = len(process.segments(session_dir)) if session_dir else 0
+            if session_dir:
+                process.write_state(session_dir, recording=False,
+                                    ended=self.session_ended_iso)
+            base = os.path.basename(session_dir) if session_dir else "?"
+            log(f"Saved {n} segment(s) in {base}\\. Click 'Process recordings' "
+                "to analyze (e.g. once your VPN is up).")
+        except Exception as e:
+            log(f"Finalize error: {e}")
+        finally:
+            self.root.after(0, lambda: self.status_lbl.config(foreground=_OK))
+            self.root.after(0, lambda: self.status.set("Ready."))
+            self.root.after(0, lambda: self.rec_btn.config(state="normal"))
+            self.root.after(0, lambda: self._set_settings_enabled(True))
+            self.root.after(0, self._update_process_button)
 
     def _audio_args(self, sys_wav, has_mic, sys_ok):
         """ffmpeg (extra_inputs, map/filter, codec) args for combining audio.
@@ -1011,51 +979,7 @@ class RecorderApp:
         # Mic audio (if any) is already in the video file — copy as-is.
         return ([], [], ["-c", "copy"])
 
-    def _segment(self, video, sys_wav, session_dir, has_mic, sys_ok):
-        """Write seg_000.mp4, seg_001.mp4, … into session_dir; return the count.
-
-        Video is copied (no re-encode); when system audio is present it is mixed
-        in (with the mic, if any) and re-encoded to AAC. -reset_timestamps makes
-        each segment start at t=0 so the analyzer can stitch them by duration.
-        """
-        pattern = os.path.join(session_dir, "seg_%03d.mp4")
-        seg_opts = ["-f", "segment", "-segment_time", str(SEGMENT_SECONDS),
-                    "-reset_timestamps", "1", "-segment_format", "mp4"]
-        extra_in, maps, codec = self._audio_args(sys_wav, has_mic, sys_ok)
-        cmd = ([self.ffmpeg, "-hide_banner", "-y", "-i", video]
-               + extra_in + maps + codec + seg_opts + [pattern])
-        try:
-            r = subprocess.run(
-                cmd, capture_output=True,
-                creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
-            )
-        except Exception as e:
-            self.write(f"Segment error: {e}")
-            return 0
-        if r.returncode != 0:
-            return 0
-        return len(glob.glob(os.path.join(session_dir, "seg_*.mp4")))
-
-    # ---- Live (during-recording) analysis ---------------------------------
-    def _live_active(self):
-        """True if live during-recording analysis can run: backend is Gemini and
-        the SDK + key are present. Live mode is Gemini-only — the Claude/Whisper
-        pipeline is too CPU-heavy to run alongside the capture."""
-        if os.environ.get("ANALYSIS_BACKEND", "claude").strip().lower() != "gemini":
-            return False
-        try:
-            import gemini
-            return gemini.available()
-        except Exception:
-            return False
-
-    def _gemini_model(self):
-        try:
-            import gemini
-            return gemini.MODEL
-        except Exception:
-            return "gemini"
-
+    # ---- Capture muxer (fold finalized chunks into seg_NNN.mp4; no upload) --
     def _mux_one(self, video, sys_wav, out, has_mic, sys_ok):
         """Mux ONE finalized video chunk with its system-audio WAV into ``out``.
         Mirrors _segment's audio handling but for a single (non-segmented) file.
@@ -1074,16 +998,18 @@ class RecorderApp:
         return (r.returncode == 0 and os.path.isfile(out)
                 and os.path.getsize(out) > 1000)
 
-    def _process_chunk(self, session_dir, ffmpeg, has_mic, idx, live, log):
-        """Mux one finalized chunk into seg_NNN.mp4 and analyze it with Gemini,
-        accumulating results (in session-absolute time) into ``live``."""
+    def _mux_chunk(self, session_dir, ffmpeg, has_mic, idx, log):
+        """Fold one finalized chunk (_vraw_{idx} + _sraw_{idx}) into a complete
+        seg_{idx}.mp4. Mux only — nothing is uploaded. Idempotent: skips a chunk
+        whose seg file already exists, so recovery/resume is safe."""
+        seg = os.path.join(session_dir, f"seg_{idx:03d}.mp4")
+        if os.path.isfile(seg) and os.path.getsize(seg) > 1000:
+            return
         vraw = os.path.join(session_dir, f"_vraw_{idx:03d}.mp4")
         if not (os.path.isfile(vraw) and os.path.getsize(vraw) > 1000):
-            log(f"  live: chunk {idx} missing/empty — skipping.")
             return
         sraw = os.path.join(session_dir, f"_sraw_{idx:03d}.wav")
         sys_ok = os.path.isfile(sraw) and os.path.getsize(sraw) > 1000
-        seg = os.path.join(session_dir, f"seg_{idx:03d}.mp4")
 
         if self._mux_one(vraw, sraw, seg, has_mic, sys_ok):
             for f in (vraw, sraw):
@@ -1092,15 +1018,16 @@ class RecorderApp:
                         os.remove(f)
                 except Exception:
                     pass
+            log(f"  saved {os.path.basename(seg)}.")
         else:
             # Mux failed — keep the raw video chunk (mic embedded, no sys audio)
-            # so the chunk is still analyzable.
+            # so the chunk is still analyzable later.
             try:
                 os.replace(vraw, seg)
-                log(f"  live: chunk {idx} mux failed; kept raw video as "
+                log(f"  chunk {idx}: mux failed; kept raw video as "
                     f"{os.path.basename(seg)}.")
             except Exception as e:
-                log(f"  live: chunk {idx} unusable ({e}).")
+                log(f"  chunk {idx} unusable ({e}).")
                 return
             try:
                 if os.path.isfile(sraw):
@@ -1108,26 +1035,18 @@ class RecorderApp:
             except Exception:
                 pass
 
-        base = live.get("base", 0.0)
-        log(f"  live: analyzing chunk {idx} (@{analyze.fmt_clock(base)})…")
-        blocks, transcript, dur = insights.analyze_chunk_live(seg, base, ffmpeg, log=log)
-        live["blocks"].extend(blocks)
-        live["transcript"].extend(transcript)
-        live["base"] = base + (dur or 0.0)
-        log(f"  live: chunk {idx} → {len(blocks)} block(s); session now "
-            f"{analyze.fmt_clock(live['base'])}.")
+    def _mux_loop(self, session_dir, ffmpeg, has_mic, sys_rec, stop_event):
+        """Background worker: while recording, fold each finalized chunk into a
+        complete seg_NNN.mp4. NO Gemini calls — uploading happens later via
+        Process.
 
-    def _live_loop(self, session_dir, ffmpeg, has_mic, sys_rec, stop_event, live):
-        """Background worker: while recording, mux+analyze each finalized chunk.
-
-        The video segment muxer writes _vraw_000.mp4, _vraw_001.mp4, … ; chunk N
-        is finalized once _vraw_{N+1}.mp4 appears (the muxer lags by one). For
-        each finalized chunk we rotate the system-audio WAV to match, mux
-        video+audio into seg_NNN.mp4, and hand it to Gemini. Accumulated results
-        land in ``live`` for the finalizer at stop. Never raises into the app."""
+        The segment muxer writes _vraw_000.mp4, _vraw_001.mp4, … ; chunk N is
+        finalized once _vraw_{N+1}.mp4 appears (the muxer lags by one). For each
+        finalized chunk we rotate the system-audio WAV to match and mux. Never
+        raises into the app."""
         log = lambda m: self.root.after(0, self.write, m)
         rotated_to = 0   # index of the currently-open _sraw WAV (start opened _000)
-        processed = 0    # next chunk index to mux + analyze
+        processed = 0    # next chunk index to mux
         rx = re.compile(r"_vraw_(\d+)\.mp4$")
         try:
             while True:
@@ -1147,7 +1066,7 @@ class RecorderApp:
                     try:
                         sys_rec.rotate(nxt)
                     except Exception as e:
-                        log(f"  live: system-audio rotate failed ({e}).")
+                        log(f"  system-audio rotate failed ({e}).")
                     rotated_to += 1
 
                 # At stop, finalize the last open WAV so the last chunk has audio.
@@ -1161,112 +1080,140 @@ class RecorderApp:
                 finalized_max = maxidx if draining else maxidx - 1
                 while processed <= finalized_max:
                     try:
-                        self._process_chunk(session_dir, ffmpeg, has_mic,
-                                            processed, live, log)
+                        self._mux_chunk(session_dir, ffmpeg, has_mic, processed, log)
                     except Exception as e:
-                        log(f"  live: chunk {processed} error ({e}).")
+                        log(f"  chunk {processed} mux error ({e}).")
                     processed += 1
 
                 if draining and processed > maxidx:
                     break
-                stop_event.wait(LIVE_POLL_SECONDS)
+                stop_event.wait(MUX_POLL_SECONDS)
         except Exception as e:
-            log(f"Live worker stopped on error: {e}")
+            log(f"Muxer stopped on error: {e}")
 
-    def _stop_live(self):
-        """Signal the live worker to drain the last chunk(s) and finish. The
-        join + daily synthesis run on a background thread so the GUI stays live."""
-        self.write("Stopping… finishing live analysis of the last chunk(s).")
-        self.analyze_btn.config(state="disabled")
-        self.rec_btn.config(state="disabled")
-        if self.live_stop_event:
-            self.live_stop_event.set()
-        meta = {"started": self.session_started_iso, "ended": self.session_ended_iso}
-        threading.Thread(
-            target=self._live_finalize_worker,
-            args=(self.session_dir, self._live, self.live_thread, meta),
-            daemon=True).start()
-
-    def _live_finalize_worker(self, session_dir, live, thread, meta):
-        """Wait for the live worker to drain, then synthesize the day and open
-        the report. Falls back to a full at-stop analysis if live produced no
-        blocks (e.g. Gemini was unreachable the whole session)."""
-        log = lambda m: self.root.after(0, self.write, m)
-        try:
-            if thread:
-                thread.join()
-            blocks = (live or {}).get("blocks") or []
-            transcript = (live or {}).get("transcript") or []
-            total_dur = (live or {}).get("base", 0.0)
-            tmp_dirs = (live or {}).get("tmp_dirs") or []
-            if blocks:
-                report, summary = insights.finalize_session_live(
-                    session_dir, REC_DIR, blocks, transcript, total_dur,
-                    meta=meta, tmp_dirs=tmp_dirs, log=log)
-            else:
-                log("Live analysis produced no blocks — running a full analysis "
-                    "of the saved segments instead.")
-                report, summary = insights.analyze_session(
-                    session_dir, self.ffmpeg, REC_DIR, meta=meta, log=log)
-            self.root.after(0, self._show_summary, summary)
-            if report and os.path.isfile(report):
-                self.root.after(0, self.write, "Opening visual report…")
-                try:
-                    os.startfile(report)
-                except Exception:
-                    pass
-        except Exception as e:
-            self.root.after(0, self.write, f"Live finalize error: {e}")
-        finally:
-            self.live = False
-            self.root.after(0, lambda: self.status_lbl.config(foreground=_OK))
-            self.root.after(0, lambda: self.status.set("Ready."))
-            self.root.after(0, lambda: self.rec_btn.config(state="normal"))
-            self.root.after(0, lambda: self.analyze_btn.config(state="normal"))
-            self.root.after(0, lambda: self._set_settings_enabled(True))
-
-    # ---- Analysis ---------------------------------------------------------
-    def analyze_last(self):
-        segs = (sorted(glob.glob(os.path.join(self.session_dir, "seg_*.mp4")))
-                if self.session_dir else [])
-        if not segs:
-            messagebox.showinfo("No recording", "Record something first.")
+    # ---- Processing (upload + analyze accumulated recordings) -------------
+    def process_recordings(self):
+        """Start a resumable batch over every recording that still needs it."""
+        if self.proc is not None or self.processing:
             return
-        if not os.environ.get("ANTHROPIC_API_KEY"):
-            self.write("No ANTHROPIC_API_KEY — will produce transcript only (no Claude summary).")
-        self.analyze_btn.config(state="disabled")
+        n_sess, _ = process.pending_summary(REC_DIR)
+        if n_sess == 0:
+            messagebox.showinfo("Nothing to process",
+                                "All recordings have already been analyzed.")
+            return
+        self.processing = True
+        self.proc_stop_event = threading.Event()
         self.rec_btn.config(state="disabled")
+        self.process_btn.config(text="Stop processing", command=self.stop_processing)
+        self._set_settings_enabled(False)
         self.status_lbl.config(foreground=_INFO)
-        self.status.set("Analyzing…")
-        meta = {"started": self.session_started_iso, "ended": self.session_ended_iso}
-        threading.Thread(target=self._analyze_worker,
-                         args=(self.session_dir, meta), daemon=True).start()
+        self.status.set("Processing…")
+        threading.Thread(target=self._process_worker, daemon=True).start()
 
-    def _analyze_worker(self, session_dir, meta):
+    def stop_processing(self):
+        """Ask the Process worker to stop after the current segment. Safe: each
+        finished segment is already checkpointed, so it resumes next time."""
+        if self.proc_stop_event:
+            self.proc_stop_event.set()
+        self.write("Stopping after the current segment… progress is saved.")
+        self.process_btn.config(state="disabled")
+
+    def _process_worker(self):
+        log = lambda m: self.root.after(0, self.write, m)
+
+        def progress(name, i, n):
+            self.root.after(0, self.status.set,
+                            f"Processing {name} · segment {i + 1}/{n}…")
+
+        last_report = None
         try:
-            report, summary = insights.analyze_session(
-                session_dir, self.ffmpeg, REC_DIR, meta=meta,
-                log=lambda m: self.root.after(0, self.write, m),
-            )
-            self.root.after(0, self._show_summary, summary)
-            if report and os.path.isfile(report):
-                self.root.after(0, self.write, "Opening visual report…")
+            res = process.process_all_pending(
+                REC_DIR, self.ffmpeg, log=log,
+                should_stop=lambda: bool(self.proc_stop_event
+                                         and self.proc_stop_event.is_set()),
+                progress=progress)
+            for r in (res.get("results") or []):
+                if r.get("report"):
+                    last_report = r["report"]
+            if last_report and os.path.isfile(last_report):
+                log("Opening the latest report…")
                 try:
-                    os.startfile(report)
+                    os.startfile(last_report)
                 except Exception:
                     pass
         except Exception as e:
-            self.root.after(0, self.write, f"Analysis error: {e}")
+            log(f"Processing error: {e}")
         finally:
+            self.processing = False
             self.root.after(0, lambda: self.status_lbl.config(foreground=_OK))
             self.root.after(0, lambda: self.status.set("Ready."))
             self.root.after(0, lambda: self.rec_btn.config(state="normal"))
-            self.root.after(0, lambda: self.analyze_btn.config(state="normal"))
+            self.root.after(0, lambda: self._set_settings_enabled(True))
+            self.root.after(0, self._update_process_button)
 
-    def _show_summary(self, summary):
-        self.log.insert("end", "\n===== SUMMARY =====\n")
-        self.log.insert("end", summary + "\n")
-        self.log.see("end")
+    def _update_process_button(self):
+        """Reflect how many recordings still need processing in the button label,
+        and enable it only when there's work and we're idle."""
+        try:
+            n_sess, _ = process.pending_summary(REC_DIR)
+        except Exception:
+            n_sess = 0
+        self._pending_sessions = n_sess
+        busy = (self.proc is not None) or self.processing
+        label = f"Process recordings ({n_sess})" if n_sess else "Process recordings"
+        try:
+            self.process_btn.config(
+                text=label, command=self.process_recordings,
+                state=("disabled" if (busy or not n_sess) else "normal"))
+        except Exception:
+            pass
+
+    def _recover_unfinished(self):
+        """On launch, tidy any session left mid-recording by a crash/shutdown:
+        mux orphan _vraw/_sraw chunks into seg files and clear the stale
+        'recording' flag so the session shows up as pending (not stuck)."""
+        try:
+            rx = re.compile(r"_vraw_(\d+)\.mp4$")
+            for sd in process.session_dirs(REC_DIR):
+                st = process.read_state(sd)
+                orphans = sorted(glob.glob(os.path.join(sd, "_vraw_*.mp4")))
+                if not orphans and not st.get("recording"):
+                    continue
+                if orphans:
+                    self.write(f"Recovering {os.path.basename(sd)} "
+                               f"({len(orphans)} unfinished chunk(s))…")
+                    for v in orphans:
+                        m = rx.search(os.path.basename(v))
+                        if m:
+                            self._mux_chunk(sd, self.ffmpeg,
+                                            bool(st.get("has_mic")),
+                                            int(m.group(1)), self.write)
+                if st.get("recording"):
+                    process.write_state(sd, recording=False)
+        except Exception as e:
+            self.write(f"Recovery skipped ({e}).")
+
+    def _on_close(self):
+        """Close cleanly: tell ffmpeg to finish the current chunk and signal the
+        workers to stop. Segments are crash-safe, so whatever the muxer doesn't
+        finish here is recovered on next launch."""
+        try:
+            if self.proc is not None:
+                try:
+                    self.proc.stdin.write(b"q")
+                    self.proc.stdin.flush()
+                    self.proc.wait(timeout=5)
+                except Exception:
+                    try:
+                        self.proc.terminate()
+                    except Exception:
+                        pass
+            if self.mux_stop_event:
+                self.mux_stop_event.set()
+            if self.proc_stop_event:
+                self.proc_stop_event.set()
+        finally:
+            self.root.destroy()
 
 
 def main():

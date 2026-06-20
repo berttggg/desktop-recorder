@@ -20,8 +20,13 @@ of thought, and can answer "what was I working on last Tuesday afternoon?" by
 - **Builds a personal knowledge base** — every day is saved and indexed so you can
   search your own past by meaning, not just text. Embeddings run **on-device for
   free by default**, or switch to **Gemini embeddings** for higher-quality search.
-- **Works while you work** — on the Gemini backend it analyzes each ~10-minute
-  chunk live, so your day report is essentially ready the moment you stop.
+- **Records now, uploads later** — recording only captures to disk in crash-safe
+  ~10-minute segments; nothing is sent to the cloud until you click **Process
+  recordings**. Ideal for spotty or restricted networks: record offline, then
+  process once you're back online.
+- **Survives a shutdown** — if your laptop dies (or you close the app) mid-record
+  or mid-process, you don't lose your day: finished segments are safe on disk and
+  processing resumes exactly where it left off.
 - **Stays running through hiccups** — automatic model failover means if a model is
   overloaded or its free quota runs out, it transparently switches to another and
   keeps going.
@@ -37,8 +42,12 @@ of thought, and can answer "what was I working on last Tuesday afternoon?" by
   - **Claude (Anthropic)** — samples frames + transcribes audio locally
     (faster-whisper) and analyzes with Claude. Works with no key too, falling
     back to a basic local summary.
-- **Live analysis while recording** (Gemini): each ~10-minute chunk is analyzed
-  as you go, so the day report is almost ready the moment you stop.
+- **On-demand, resumable batch processing**: recordings accumulate untouched
+  until you click **Process recordings (N)**, which uploads + analyzes everything
+  not yet done (across days). Each segment is checkpointed to disk the moment it
+  finishes, so a crash/shutdown resumes from the next un-analyzed segment with no
+  re-upload, a failed upload simply retries next time, and a failed run never
+  overwrites your previous good report.
 - **Automatic model failover** (Gemini): if a model is overloaded (503) or its
   free daily quota is exhausted (429), it transparently switches to another.
 - **Live model discovery**: the model picker is populated from the API, so newly
@@ -118,8 +127,11 @@ entirely on your machine.
 ## Usage
 
 - **`Start Recorder.bat`** — launch the recorder GUI. Pick your mic, toggle
-  system audio, choose the Gemini model, then Start/Stop. Analysis runs on stop
-  (or live, while recording, on the Gemini backend).
+  system audio, choose the Gemini model, then Start/Stop. **Recording only
+  captures to disk — nothing is uploaded.** When you're ready (e.g. once your
+  VPN is up), click **Process recordings (N)** to upload + analyze everything
+  that's accumulated; *N* is how many recordings are still waiting. Processing
+  runs in the background, is resumable, and opens the report when it finishes.
 - **`Open Dashboard.bat`** — open the knowledge-base dashboard in your browser to
   review and search past sessions.
 
