@@ -340,8 +340,9 @@ _MODELS_CACHE = None
 _DISPLAY = {}        # model id -> API display_name (the exact dashboard name)
 _IS_VIDEO = {}       # model id -> True if usable for video analysis
 
-# Also offer Gemma (text-only) models in the picker. They can't analyze video,
-# so they're labelled "(text-only)"; on by default (GEMINI_INCLUDE_GEMMA=0 off).
+# Also offer Gemma models in the picker. They handle text + images but NOT the
+# native video this app uploads, so they're labelled "(no video)"; on by default
+# (set GEMINI_INCLUDE_GEMMA=0 to hide them).
 INCLUDE_GEMMA = (os.environ.get("GEMINI_INCLUDE_GEMMA", "1").strip().lower()
                  not in ("0", "false", "no", "off", ""))
 
@@ -363,11 +364,11 @@ def display_name(model_id):
 
 def model_label(model_id):
     """Label for the analysis-model picker: the dashboard display name, with a
-    '(text-only)' suffix for non-video models (Gemma) so they're not mistaken
-    for analysis-capable."""
+    '(no video)' suffix for models that can't take this app's native video input
+    (Gemma) so they're not mistaken for analysis-capable."""
     lbl = display_name(model_id)
-    if _IS_VIDEO.get(model_id) is False and "text-only" not in lbl.lower():
-        lbl += "  (text-only)"
+    if _IS_VIDEO.get(model_id) is False and "no video" not in lbl.lower():
+        lbl += "  (no video)"
     return lbl
 
 
@@ -388,8 +389,9 @@ def _is_video_model(m):
 
 
 def _is_gemma(m):
-    """Gemma chat models — text-only on the Gemini API (no video). Offered in the
-    picker for completeness but clearly marked, never used for analysis silently."""
+    """Gemma chat models — multimodal for text + images, but NOT the native video
+    this app uploads (video would need frame-splitting first). Offered in the
+    picker but clearly marked so a video-incapable model isn't picked unknowingly."""
     name = (getattr(m, "name", "") or "").replace("models/", "")
     if not name.startswith("gemma"):
         return False
@@ -400,7 +402,7 @@ def list_models(force=False):
     """Live list of model ids for the analysis picker (cached).
 
     Video-capable Gemini models first (KNOWN_MODELS in curated order, then any
-    newer/extra ones sorted), then Gemma text-only models (if INCLUDE_GEMMA).
+    newer/extra ones sorted), then Gemma models (no native video; if INCLUDE_GEMMA).
     Side effect: records each model's API display_name (the exact dashboard name)
     and video-capability in _DISPLAY/_IS_VIDEO so the GUI can label them. Never
     raises: falls back to KNOWN_MODELS offline, caching only non-empty results."""

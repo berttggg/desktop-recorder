@@ -60,7 +60,8 @@ of thought, and can answer "what was I working on last Tuesday afternoon?" by
   API and refreshed on launch and periodically, so newly released models show up
   on their own. Models are shown by their **exact dashboard display name** (e.g.
   "Gemini 3.1 Flash Lite") to match Google's usage dashboard, and **Gemma**
-  models are listed too — marked "(text-only)" since they can't analyze video.
+  models are listed too — marked "(no video)" since they handle text + images but
+  not the native video this app uploads for analysis.
 - **Knowledge base dashboard**: a local web UI to browse past days and search
   them by meaning.
 - **Selectable embedding backend**: choose how the knowledge base is embedded for

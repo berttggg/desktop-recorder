@@ -595,7 +595,7 @@ class RecorderApp:
     # ---- Model picker labels (dashboard display names <-> model ids) ------
     def _build_model_options(self, ids):
         """Build dropdown labels (exact dashboard display names; Gemma marked
-        '(text-only)') and the {label: id} map. Returns the list of labels."""
+        '(no video)') and the {label: id} map. Returns the list of labels."""
         try:
             import gemini
             label_fn = gemini.model_label
