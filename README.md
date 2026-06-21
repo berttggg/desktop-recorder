@@ -26,11 +26,15 @@ of thought, and can answer "what was I working on last Tuesday afternoon?" by
   **English**, while the transcript stays verbatim in whatever language was
   actually spoken. Embeddings use **Google's Gemini embedding API** (higher
   quality); the offline on-device backend is optional and off by default.
-- **Looks things up for you (web search)** — using Google Search grounding, each
-  day report gets a **Research & resources** section: background on the day's
-  topics and a relevant link/how-to for each open to-do, with **cited sources**.
-  A **Deep dive** box lets you research any topic or question on demand and opens
-  a sourced brief. (Sends those queries to Google; uses your search quota.)
+- **Notices the specifics, then looks them up** — the analysis pulls out the
+  **named things on your screen** (people & social accounts like @handles,
+  companies, products/tools, stock tickers, titles) into a **People & things
+  noticed** list. Then, using Google Search grounding, each day report gets a
+  **Research & resources** section that explains who/what the notable ones are
+  (e.g. an account you followed — who they are and what they post), adds context
+  on the day's topics, and gives a link/how-to per open to-do — all with **cited
+  sources**. A **Deep dive** box researches any topic/question on demand into a
+  sourced brief. (Sends those queries to Google; uses your search quota.)
 - **Records now, uploads later** — recording only captures to disk in crash-safe
   ~10-minute segments; nothing is sent to the cloud until you click **Process
   recordings**. Ideal for spotty or restricted networks: record offline, then

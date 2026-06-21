@@ -206,9 +206,12 @@ def _session_documents(session_id, data):
     summary = (data.get("summary") or "").strip()
     acc = [str(a) for a in (data.get("accomplishments") or [])]
     topics = [str(t) for t in (data.get("topics") or [])]
+    ents = [str(e) for e in (data.get("entities") or [])]
     parts = [summary] + acc
     if topics:
         parts.append("Topics: " + ", ".join(topics))
+    if ents:
+        parts.append("Mentioned: " + ", ".join(ents))
     doc = "\n".join(p for p in parts if p).strip()
     if doc:
         yield ("session", doc)
@@ -442,10 +445,11 @@ def _day_research(session_dir, insights, log=print):
     summary = (insights.get("summary") or "").strip()
     todos = [str(t) for t in (insights.get("action_items") or [])]
     topics = [str(t) for t in (insights.get("topics") or [])]
-    if not summary and not todos:
+    entities = [str(e) for e in (insights.get("entities") or [])]
+    if not summary and not todos and not entities:
         return
-    sig = hashlib.sha1(json.dumps([summary, topics, todos], ensure_ascii=False,
-                                  sort_keys=True).encode("utf-8")).hexdigest()
+    sig = hashlib.sha1(json.dumps([summary, topics, todos, entities],
+                       ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()
     try:    # reuse prior research when the inputs are unchanged (no re-spend)
         with open(os.path.join(session_dir, "insights.json"), encoding="utf-8") as f:
             prev = json.load(f).get("research")
@@ -459,6 +463,9 @@ def _day_research(session_dir, insights, log=print):
         ctx.append("Summary: " + summary)
     if topics:
         ctx.append("Topics: " + ", ".join(topics))
+    if entities:
+        ctx.append("Notable entities seen today (people / accounts / companies / "
+                   "products / tickers):\n" + "\n".join("- " + e for e in entities[:20]))
     if todos:
         ctx.append("Open to-dos:\n" + "\n".join("- " + t for t in todos))
     log("Researching the day on the web (Google Search grounding)…")
@@ -478,7 +485,19 @@ def _finalize_and_report(session_dir, session_id, rec_dir, blocks, transcript,
     insights["time_breakdown"] = time_breakdown
     runs = _runs(blocks)
 
-    # Web-grounded enrichment (background + to-do resources), before we persist.
+    # Notable on-screen entities gathered across the day (deduped, capped).
+    ents, seen = [], set()
+    for b in blocks:
+        for e in (b.get("entities") or []):
+            e = str(e).strip()
+            k = e.lower()
+            if e and k not in seen:
+                seen.add(k)
+                ents.append(e)
+    if ents:
+        insights["entities"] = ents[:25]
+
+    # Web-grounded enrichment (entities + background + to-do resources), before we persist.
     _day_research(session_dir, insights, log)
 
     # transcript + insights files — written atomically (temp + os.replace) so a
@@ -756,6 +775,11 @@ def _render_session_report(session_dir, session_id, insights, runs, time_breakdo
         "<ul class='clean todo'>" + "".join(f"<li>{esc(str(a))}</li>" for a in todo) + "</ul>"
         if todo else "<p class='empty'>No open items detected.</p>") + "</div>")
     p.append("</div>")
+
+    ents = insights.get("entities") or []
+    if ents:
+        pills = "".join(f"<span class='pill'>{esc(str(e))}</span>" for e in ents)
+        p.append("<div class='card'><h2>People &amp; things noticed</h2>" + pills + "</div>")
 
     research = insights.get("research") or {}
     rtext = (research.get("text") or "").strip()

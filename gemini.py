@@ -170,23 +170,29 @@ the transcript verbatim in whatever language was actually spoken.
 {{"blocks":[
   {{"start": <seconds from the start of THIS clip>,
     "end": <seconds from the start of THIS clip>,
-    "activity": "<=5 word label of the main task",
+    "activity": "<=5 word label of what is ACTUALLY on screen in this block",
     "app": "main app, website, or meeting/app being used",
     "detail": "1-2 sentences: what happened ON SCREEN and what was DISCUSSED; name the specific files, URLs/sites, tools and people involved, and any decision or question raised",
+    "entities": ["specific NAMED things in this block worth looking up later — people & social handles (e.g. @serenity), companies/brands, products/tools/repos, stock tickers, video/article titles; add a few words of context, e.g. 'Serenity (X account, posted a stock buy list)', 'NVDA (ticker)'. [] if none"],
     "todos": ["a concrete task someone said still needs doing — include any deadline or owner mentioned"]}}
  ],
  "transcript":[
   {{"t": <seconds from the start of THIS clip when this line starts>,
     "text": "the exact words spoken, verbatim, in the original language"}}
  ]}}
-Use 1-6 blocks. Make the transcript NEAR-VERBATIM, split into short one-sentence
-lines each with its start time; capture everything spoken, not a summary — in a
-meeting/call note who is speaking when it's clear ("Alice: …"). Use [] for
-transcript only if there is genuinely no speech. Ground everything in what the
-video/audio actually show; use "" or [] when unknown."""
+Make a SEPARATE block for each distinct activity (typically 3-10): start a new
+block whenever the app/website or task changes — e.g. switching to X/Twitter or
+opening a specific post is its OWN block, never merged into the surrounding work.
+Label each block by what is genuinely on screen, not by what came before. Make
+the transcript NEAR-VERBATIM, split into short one-sentence lines each with its
+start time; capture everything spoken, not a summary — in a meeting/call note who
+is speaking when it's clear ("Alice: …"). Use [] for transcript only if there is
+genuinely no speech. Ground everything in what the video/audio actually show; use
+"" or [] when unknown."""
 
 REDUCE_PROMPT = """You are writing a precise daily work journal from a log of one
-person's computer activity. Each line is: time | activity | app | detail | todos.
+person's computer activity. Each line is: time | activity | app | detail |
+entities | todos.
 A day may mix meetings/calls, coding/technical work, research/browsing and
 general work — handle whichever appear.
 
@@ -236,16 +242,21 @@ in what is given; do not invent.
 {context}"""
 
 
-DAY_RESEARCH_PROMPT = """You can search the web. Below is a summary of what someone
-did at their computer today, their main topics, and their open to-dos. Add useful
-OUTSIDE context — in ENGLISH, plain text, no markdown headings:
+DAY_RESEARCH_PROMPT = """You can search the web. Below is what someone did at
+their computer today: a summary, their main topics, the NOTABLE entities they came
+across (people, social accounts like @handles, companies/brands, products/tools,
+stock tickers, titles), and their open to-dos. Add genuinely useful OUTSIDE
+context — ENGLISH, plain text, no markdown headings:
 
-1) A few sentences of relevant background or recent developments on the day's
-   topics / tools / people — only what genuinely adds value; skip if nothing.
-2) For each open to-do, one concrete pointer to help get it done — a specific
-   resource, doc, or approach — with a link.
+1) For the most notable few entities, say concisely WHO/WHAT each is, what's
+   notable or recent about it, and why it might matter to this person — each with
+   a link. (e.g. an X account they followed: who they are and what they post.)
+2) A couple of sentences of relevant background / recent developments on the
+   day's main topics or tools.
+3) For each open to-do, one concrete pointer (resource, doc, or approach) + a link.
 
-Cite the pages you used. Keep it tight. Here is the day:
+Cite the pages you used. Be specific; skip anything you can't ground. Here is the
+day:
 
 {context}"""
 
@@ -606,6 +617,7 @@ def _coerce_blocks(raw, w0, w1, base):
             "app": _clean(b.get("app")),
             "detail": _clean(b.get("detail")),
             "speech": _clean(b.get("speech")),
+            "entities": [t for t in (_clean(t) for t in (b.get("entities") or [])) if t],
             "todos": [t for t in (_clean(t) for t in (b.get("todos") or [])) if t],
         })
     if not items:
@@ -1043,7 +1055,8 @@ def analyze_one(seg, base, ffmpeg, log=print, client=None, thumbdir=None):
                     thumb = None
                 blocks.append({"t0": blk["t0"], "t1": blk["t1"], "thumb": thumb,
                                "activity": blk["activity"], "app": blk["app"],
-                               "detail": blk["detail"], "todos": blk["todos"]})
+                               "detail": blk["detail"], "todos": blk["todos"],
+                               "entities": blk.get("entities", [])})
                 # Per-block speech is only a fallback for older replies that lack
                 # the dedicated verbatim transcript array below.
                 if not utter and blk["speech"]:
@@ -1135,9 +1148,10 @@ def reduce(blocks, log=print):
     lines = []
     for blk in blocks:
         todos = "; ".join(blk.get("todos") or []) or "-"
+        ents = "; ".join(blk.get("entities") or []) or "-"
         lines.append(f"{analyze.fmt_clock(blk['t0'])}-{analyze.fmt_clock(blk['t1'])} | "
                      f"{blk.get('activity', '')} | {blk.get('app', '')} | "
-                     f"{blk.get('detail', '')} | {todos}")
+                     f"{blk.get('detail', '')} | entities: {ents} | todos: {todos}")
     prompt = REDUCE_PROMPT.format(blocks="\n".join(lines)[:15000])
     try:
         resp = _generate(_client(), REDUCE_MODEL, [prompt],
