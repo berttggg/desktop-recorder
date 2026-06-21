@@ -9,9 +9,12 @@ pyaudiowpatch
 # Local transcription (Claude/local backends)
 faster-whisper
 
-# Local semantic-search knowledge base
-fastembed
+# Semantic-search knowledge base (vectors + cosine search). Embeddings use the
+# Gemini API by default; numpy stores/compares the vectors locally.
 numpy
+# Optional offline embedding fallback (BAAI/bge-small-en-v1.5). Not installed by
+# default — `pip install fastembed` only if you want the local backend.
+# fastembed
 
 # System-tray icon (run minimized in the background)
 pystray

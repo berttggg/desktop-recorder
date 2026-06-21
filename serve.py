@@ -117,6 +117,11 @@ class Handler(SimpleHTTPRequestHandler):
         try:
             qvec = query_vector(query)
             results = kb.search(kb.db_path(self.rec_dir), qvec, k=k)
+            # Make report links relative to the served root so they work in-browser.
+            for r in results:
+                rp = r.get("report_path") or ""
+                if rp:
+                    r["report_path"] = rp.replace(self.rec_dir, ".").replace(os.sep, "/")
             return self._send_json({"query": query, "results": results})
         except Exception as e:
             return self._send_json(

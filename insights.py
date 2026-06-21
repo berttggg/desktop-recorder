@@ -236,9 +236,30 @@ def _doc_hash(units, sig=""):
     return h.hexdigest()
 
 
-def _index_embeddings(db, session_id, data, log=print):
-    """Embed a session's documents and store them for semantic search.
-    Skips work if this exact content was already embedded."""
+def _transcript_units(lines, max_chars=1000, cap=80):
+    """Chunk transcript lines (strings) into ~max_chars search units so spoken
+    content is findable, not just the summary. Capped so a very long day can't
+    explode the embedding count. Returns [("transcript", chunk), ...]."""
+    units, buf, n = [], [], 0
+    for ln in (lines or []):
+        ln = (str(ln) or "").strip()
+        if not ln:
+            continue
+        buf.append(ln)
+        n += len(ln) + 1
+        if n >= max_chars:
+            units.append(("transcript", " ".join(buf)))
+            buf, n = [], 0
+            if len(units) >= cap:
+                return units
+    if buf and len(units) < cap:
+        units.append(("transcript", " ".join(buf)))
+    return units
+
+
+def _index_embeddings(db, session_id, data, transcript=None, log=print):
+    """Embed a session's documents (summary, to-dos, AND the verbatim transcript)
+    and store them for semantic search. Skips work if the content is unchanged."""
     try:
         import embed
     except Exception:
@@ -247,6 +268,9 @@ def _index_embeddings(db, session_id, data, log=print):
         log(f"Embeddings: {embed.label()} backend unavailable — skipping semantic index.")
         return
     units = list(_session_documents(session_id, data))
+    if transcript:
+        lines = [f"[{analyze.fmt_clock(s)}] {x}" for s, _e, x in transcript if x]
+        units += _transcript_units(lines)
     if not units:
         return
     sig = ""
@@ -265,6 +289,35 @@ def _index_embeddings(db, session_id, data, log=print):
         log(f"Embeddings: indexed {len(units)} unit(s) for semantic search.")
     except Exception as e:
         log(f"Embeddings: indexing failed ({e}).")
+
+
+def index_text_unit(rec_dir, pseudo_id, kind, text, log=print):
+    """Embed one standalone text — the Overview / weekly / monthly roll-up — as a
+    searchable KB unit under a synthetic session id, so it surfaces in search.
+    Hash-gated so it only re-embeds when the text actually changes."""
+    text = (text or "").strip()
+    if not text:
+        return
+    try:
+        import embed
+        if not embed.available():
+            return
+    except Exception:
+        return
+    db = kb.db_path(rec_dir)
+    units = [(kind, text)]
+    try:
+        sig = embed.signature()
+    except Exception:
+        sig = ""
+    h = _doc_hash(units, sig)
+    if kb.embed_hashes(db).get(pseudo_id) == h:
+        return
+    try:
+        vecs = embed.embed_documents([text])
+        kb.save_embeddings(db, pseudo_id, [(kind, text, vecs[0])], doc_hash=h)
+    except Exception as e:
+        log(f"Indexing {kind} roll-up failed ({e}).")
 
 
 def reindex(rec_dir, force=False, log=print):
@@ -292,6 +345,15 @@ def reindex(rec_dir, force=False, log=print):
     total = skipped = 0
     for p in payloads:
         units = list(_session_documents(p["id"], p))
+        rp = p.get("report_path") or ""
+        tdir = os.path.dirname(rp) if rp else os.path.join(rec_dir, p["id"])
+        tpath = os.path.join(tdir, "transcript.txt")
+        try:
+            if os.path.isfile(tpath):
+                with open(tpath, encoding="utf-8") as f:
+                    units += _transcript_units(f.read().splitlines())
+        except Exception:
+            pass
         if not units:
             continue
         h = _doc_hash(units, sig)
@@ -395,7 +457,8 @@ def _finalize_and_report(session_dir, session_id, rec_dir, blocks, transcript,
     meta["report_path"] = report
     kb.save_session(kb.db_path(rec_dir), session_id, meta, insights)
     log("Saved to knowledge base.")
-    _index_embeddings(kb.db_path(rec_dir), session_id, insights, log=log)
+    _index_embeddings(kb.db_path(rec_dir), session_id, insights,
+                      transcript=transcript, log=log)
 
     build_dashboard(rec_dir, log=log)
 
@@ -490,6 +553,8 @@ DASH_JS = r"""
   var days=document.getElementById('days');
   var mode=document.getElementById('qmode');
   var none=document.getElementById('noresults');
+  var matchwrap=document.getElementById('matchwrap');
+  var matchbox=document.getElementById('matches');
   var served=(location.protocol==='http:'||location.protocol==='https:');
   var SEMANTIC='Semantic search · ranked by meaning';
   var TEXT='Text filter · matches words';
@@ -510,6 +575,29 @@ DASH_JS = r"""
     b.className='pill score';
     b.textContent=Math.round(score*100)+'% match';
     h.insertBefore(b,h.firstChild);
+  }
+  function esc(s){return (s==null?'':String(s)).replace(/[&<>"]/g,function(c){
+    return ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'})[c];});}
+  function clearMatches(){ if(matchbox) matchbox.innerHTML=''; if(matchwrap) matchwrap.style.display='none'; }
+  function renderMatches(results){
+    if(!matchwrap||!matchbox) return;
+    try{
+      var rows=(results||[]).slice(0,8);
+      if(!rows.length){ clearMatches(); return; }
+      var html='';
+      rows.forEach(function(it){
+        var d=it.date||'', rp=it.report_path||'';
+        var link=rp?("<a href='"+esc(rp)+"'>"+esc(d||'open report')+"</a>")
+                   :(d?("<span class='pill'>"+esc(d)+"</span>"):'');
+        var t=it.text||''; if(t.length>240){ t=t.slice(0,240)+'…'; }
+        html+="<div class='run day' style='display:block'>"
+             +"<h3 style='margin:4px 0'><span class='pill score'>"+Math.round((it.score||0)*100)
+             +"%</span> <span class='pill'>"+esc(it.kind||'')+"</span> "+link+"</h3>"
+             +"<p style='color:var(--txt);margin:2px 0'>"+esc(t)+"</p></div>";
+      });
+      matchbox.innerHTML=html;
+      matchwrap.style.display='block';
+    }catch(e){ clearMatches(); }
   }
   function filterF(v){
     var els=document.querySelectorAll('.f');
@@ -559,9 +647,9 @@ DASH_JS = r"""
   var timer, seq=0;
   function run(){
     var raw=q.value.trim(), v=raw.toLowerCase();
-    if(!served){ filterF(v); if(!raw){resetDays();} else {substrDays(v);} return; }
+    if(!served){ clearMatches(); filterF(v); if(!raw){resetDays();} else {substrDays(v);} return; }
     clearTimeout(timer);
-    if(!raw){ setMode(SEMANTIC); resetDays(); return; }
+    if(!raw){ setMode(SEMANTIC); clearMatches(); resetDays(); return; }
     setMode('Searching…');
     var my=++seq;
     timer=setTimeout(function(){
@@ -569,11 +657,12 @@ DASH_JS = r"""
         .then(function(r){return r.json();})
         .then(function(d){
           if(my!==seq) return;                 // a newer keystroke superseded us
-          if(d.error){ setMode(TEXT+' (offline)'); substrDays(v); return; }
+          if(d.error){ setMode(TEXT+' (offline)'); clearMatches(); substrDays(v); return; }
           setMode(SEMANTIC);
+          renderMatches(d.results);
           rankDays(d.results,v);
         })
-        .catch(function(){ if(my===seq){ setMode(TEXT+' (offline)'); substrDays(v); } });
+        .catch(function(){ if(my===seq){ setMode(TEXT+' (offline)'); clearMatches(); substrDays(v); } });
     },160);
   }
   q.addEventListener('input',run);
@@ -725,6 +814,7 @@ def build_kb_overview(rec_dir, force=False, log=print):
                 "generated": dt.datetime.now().isoformat(timespec="seconds")})
         except Exception:
             pass
+        index_text_unit(rec_dir, "_overview", "overview", text, log=log)
     return text
 
 
@@ -795,6 +885,7 @@ def build_period_insights(rec_dir, days, label, force=False, log=print):
                 "generated": dt.datetime.now().isoformat(timespec="seconds")})
         except Exception:
             pass
+        index_text_unit(rec_dir, f"_period_{label}", label, text, log=log)
     return text
 
 
@@ -848,8 +939,11 @@ def build_dashboard(rec_dir, log=print):
 
     p.append("<div class='searchbar'>"
              "<input class='search' id='q' autocomplete='off' spellcheck='false' "
-             "placeholder='Search your days, tasks, topics…  (press /)'>"
+             "placeholder='Search your days, tasks, topics, transcript…  (press /)'>"
              "<div class='meta' id='qmode'></div></div>")
+    # Direct search hits (transcript snippets, to-dos, roll-ups) — filled by JS.
+    p.append("<div class='card' id='matchwrap' style='display:none'>"
+             "<h2>Top matches</h2><div id='matches'></div></div>")
 
     p.append("<div class='card f'><h2>Open to-dos</h2>")
     if todos:

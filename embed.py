@@ -2,11 +2,13 @@
 
 Two interchangeable backends:
 
-* ``local``  — fastembed (ONNX, CPU, **offline, free**; the default). The model
-  ``BAAI/bge-small-en-v1.5`` (384-dim) runs on your machine; no data leaves it.
-* ``gemini`` — Google's hosted embedding API (``gemini-embedding-*``). Higher
-  quality, but each call **sends your KB text** (session summaries, to-dos,
-  topics, and your search queries) to Google and is subject to free-tier quota.
+* ``gemini`` — Google's hosted embedding API (``gemini-embedding-*``); **the
+  default**. Higher quality, but each call **sends your KB text** (session
+  summaries, to-dos, topics, transcript, and your search queries) to Google and
+  is subject to free-tier quota.
+* ``local``  — fastembed (ONNX, CPU, offline, free) with ``BAAI/bge-small-en-v1.5``;
+  an optional offline fallback, only used if explicitly selected AND fastembed is
+  installed (it isn't in requirements by default).
 
 Selection precedence (highest first): an explicit env var, then ``_settings.json``
 (written by the recorder GUI), then the built-in default. Both the recorder and
@@ -74,7 +76,7 @@ def _cfg(env_key, settings_key, default):
     return default
 
 
-BACKEND = str(_cfg("RECORDER_EMBED_BACKEND", "embed_backend", "local")).lower()
+BACKEND = str(_cfg("RECORDER_EMBED_BACKEND", "embed_backend", "gemini")).lower()
 LOCAL_MODEL = _cfg("RECORDER_EMBED_MODEL", "embed_local_model", DEFAULT_LOCAL_MODEL)
 GEMINI_MODEL = _cfg("RECORDER_GEMINI_EMBED_MODEL", "embed_gemini_model", DEFAULT_GEMINI_MODEL)
 # Gemini embedding model to fall back to when the primary fails (429/503/

@@ -278,6 +278,18 @@ def search(path, query_vec, k=12, kinds=None):
     norms = np.linalg.norm(mat, axis=1)
     norms[norms == 0] = 1.0
     sims = (mat @ q) / (norms * qn)
+    # Gentle recency boost: relevance still dominates, but among similar hits the
+    # more recent day wins. Loses ~0.0015/day, floored at 0.7 (~200 days old);
+    # rows with no date (e.g. roll-ups) are treated as current.
+    import datetime as _dt
+    _today = _dt.date.today()
+
+    def _recency(d):
+        try:
+            return max(0.7, 1.0 - 0.0015 * max(0, (_today - _dt.date.fromisoformat(d)).days))
+        except Exception:
+            return 1.0
+    sims = sims * np.array([_recency(r["date"]) for r in rows], dtype="float32")
     order = np.argsort(-sims)[:k]
     out = []
     for i in order:
@@ -294,7 +306,7 @@ def session_payloads(path):
     conn = connect(path)
     try:
         out = []
-        for s in conn.execute("SELECT id, summary FROM sessions").fetchall():
+        for s in conn.execute("SELECT id, summary, report_path FROM sessions").fetchall():
             sid = s["id"]
             acc = [r["text"] for r in conn.execute(
                 "SELECT text FROM accomplishments WHERE session_id=?", (sid,))]
@@ -303,7 +315,8 @@ def session_payloads(path):
             topics = [r["topic"] for r in conn.execute(
                 "SELECT topic FROM topics WHERE session_id=? AND minutes=0", (sid,))]
             out.append({"id": sid, "summary": s["summary"] or "",
-                        "accomplishments": acc, "action_items": todos, "topics": topics})
+                        "accomplishments": acc, "action_items": todos, "topics": topics,
+                        "report_path": s["report_path"] or ""})
         return out
     finally:
         conn.close()

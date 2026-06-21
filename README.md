@@ -18,13 +18,14 @@ of thought, and can answer "what was I working on last Tuesday afternoon?" by
   produces a clean summary: what you did, what you finished, what's still open,
   and the key topics.
 - **Builds a personal knowledge base** — every day is saved and indexed so you can
-  search your own past by meaning, not just text. The dashboard opens with
-  model-written **Overview**, **This week** and **This month** roll-ups that tie
-  your days together (what's progressing, what got finished, what to focus on
-  next). Summaries, to-dos and topics are written in **English**, while the
-  transcript stays verbatim in whatever language was actually spoken. Embeddings
-  run **on-device for free by default**, or switch to **Gemini embeddings** for
-  higher-quality search.
+  search your own past by meaning, not just text. Search covers your **day
+  summaries, to-dos, the verbatim transcript, and the roll-ups**, ranked by
+  meaning with a gentle boost for recent days; a **Top matches** panel surfaces
+  the exact snippets. The dashboard opens with model-written **Overview**, **This
+  week** and **This month** roll-ups. Summaries, to-dos and topics are written in
+  **English**, while the transcript stays verbatim in whatever language was
+  actually spoken. Embeddings use **Google's Gemini embedding API** (higher
+  quality); the offline on-device backend is optional and off by default.
 - **Records now, uploads later** — recording only captures to disk in crash-safe
   ~10-minute segments; nothing is sent to the cloud until you click **Process
   recordings**. Ideal for spotty or restricted networks: record offline, then
@@ -70,13 +71,12 @@ of thought, and can answer "what was I working on last Tuesday afternoon?" by
   not the native video this app uploads for analysis.
 - **Knowledge base dashboard**: a local web UI to browse past days and search
   them by meaning.
-- **Selectable embedding backend**: choose how the knowledge base is embedded for
-  search, right in the GUI —
-  - **Local (default)** — fastembed (`BAAI/bge-small-en-v1.5`, 384-dim) on CPU;
-    offline, free, and fully private.
-  - **Gemini** — Google's hosted `gemini-embedding-*` models (e.g.
-    `gemini-embedding-2`); higher quality, but sends your KB text + queries to
-    the cloud. The model list is discovered live from the API.
+- **Gemini embeddings (default)** for semantic search — Google's hosted
+  `gemini-embedding-*` models (e.g. `gemini-embedding-2`), picked in the GUI with
+  the model list discovered live from the API. Higher quality, but sends your KB
+  text + queries to the cloud. An offline on-device backend
+  (`BAAI/bge-small-en-v1.5` via fastembed) is available as a fallback but is
+  **off by default** — `pip install fastembed` and pick it in the GUI to use it.
 
   Switching backends transparently re-embeds your existing days, and search only
   ever compares vectors from the same model, so the two never get mixed up.
@@ -106,13 +106,13 @@ screen and audio leaving your machine and being processed (and possibly
 human-reviewed) by third-party AI providers.
 
 If you want to reduce exposure: use a **paid** API key (paid tiers are not used
-for training), prefer the Claude backend, keep embeddings on the **Local**
-backend, or simply don't record sensitive screens. Recordings, transcripts,
-reports, and the knowledge-base database themselves stay **local** (under
-`recordings/`, which is git-ignored) — it's the *analysis* step (and, if you pick
-the **Gemini** embedding backend, the *search-indexing* step) that ships your
-content to the cloud. With the default **Local** embedding backend, search runs
-entirely on your machine.
+for training), prefer the Claude backend, switch embeddings to the **local**
+on-device backend (`pip install fastembed`, then pick it in the GUI), or simply
+don't record sensitive screens. Recordings, transcripts, reports, and the
+knowledge-base database themselves stay **local** (under `recordings/`, which is
+git-ignored) — it's the *analysis* step and the *search-indexing* step (which by
+default uses the **Gemini** embedding API) that ship your content to the cloud.
+Switch embeddings to the local backend to keep search entirely on your machine.
 
 ## Requirements
 
