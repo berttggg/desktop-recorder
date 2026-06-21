@@ -1366,7 +1366,10 @@ def deep_research(query, log=print, timeout=None, poll=None, label="deep researc
     log(f"{label} started ({DEEP_RESEARCH_AGENT}); this can take several minutes…")
     deadline = time.time() + timeout
     terminal = {"completed", "failed", "cancelled", "incomplete", "budget_exceeded"}
-    started, last = time.time(), None
+    # Heartbeat so a multi-minute run visibly progresses instead of looking frozen
+    # (the status sits at 'in_progress' the whole time, so log on a timer too).
+    heartbeat = float(os.environ.get("GEMINI_DEEP_RESEARCH_HEARTBEAT", "30"))
+    started, last_status, last_log = time.time(), None, 0.0
     status = ""
     while True:
         if time.time() > deadline:
@@ -1383,9 +1386,10 @@ def deep_research(query, log=print, timeout=None, poll=None, label="deep researc
             log(f"{label}: poll error ({e}); retrying.")
             continue
         status = str(getattr(it, "status", "") or "")
-        if status != last:
-            log(f"  {label}: {status} ({int(time.time() - started)}s)")
-            last = status
+        now = time.time()
+        if status != last_status or (now - last_log) >= heartbeat:
+            log(f"  {label}: {status}… {int(now - started)}s elapsed")
+            last_status, last_log = status, now
         if status in terminal:
             break
     text = (getattr(it, "output_text", None) or "").strip()
