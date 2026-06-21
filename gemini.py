@@ -143,10 +143,10 @@ POLL_INTERVAL = 2.0
 UPLOAD_ATTEMPTS = max(1, int(os.environ.get("GEMINI_UPLOAD_ATTEMPTS", "3")))
 # Big enough for a near-verbatim transcript of a whole chunk plus the blocks.
 MAX_TOKENS_SEG = int(os.environ.get("GEMINI_MAX_TOKENS_SEG", "8192"))
-MAX_TOKENS_REDUCE = int(os.environ.get("GEMINI_MAX_TOKENS_REDUCE", "2048"))
-MAX_TOKENS_OVERVIEW = int(os.environ.get("GEMINI_MAX_TOKENS_OVERVIEW", "700"))
-MAX_TOKENS_PERIOD = int(os.environ.get("GEMINI_MAX_TOKENS_PERIOD", "1200"))
-MAX_TOKENS_RESEARCH = int(os.environ.get("GEMINI_MAX_TOKENS_RESEARCH", "1600"))
+MAX_TOKENS_REDUCE = int(os.environ.get("GEMINI_MAX_TOKENS_REDUCE", "3072"))
+MAX_TOKENS_OVERVIEW = int(os.environ.get("GEMINI_MAX_TOKENS_OVERVIEW", "1100"))
+MAX_TOKENS_PERIOD = int(os.environ.get("GEMINI_MAX_TOKENS_PERIOD", "1800"))
+MAX_TOKENS_RESEARCH = int(os.environ.get("GEMINI_MAX_TOKENS_RESEARCH", "3000"))
 
 _MEDIA_RES = {
     "low": "MEDIA_RESOLUTION_LOW",

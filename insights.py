@@ -239,7 +239,7 @@ def _doc_hash(units, sig=""):
     return h.hexdigest()
 
 
-def _transcript_units(lines, max_chars=1000, cap=80):
+def _transcript_units(lines, max_chars=1000, cap=200):
     """Chunk transcript lines (strings) into ~max_chars search units so spoken
     content is findable, not just the summary. Capped so a very long day can't
     explode the embedding count. Returns [("transcript", chunk), ...]."""
@@ -465,7 +465,7 @@ def _day_research(session_dir, insights, log=print):
         ctx.append("Topics: " + ", ".join(topics))
     if entities:
         ctx.append("Notable entities seen today (people / accounts / companies / "
-                   "products / tickers):\n" + "\n".join("- " + e for e in entities[:20]))
+                   "products / tickers):\n" + "\n".join("- " + e for e in entities[:50]))
     if todos:
         ctx.append("Open to-dos:\n" + "\n".join("- " + t for t in todos))
     log("Researching the day on the web (Google Search grounding)…")
@@ -495,7 +495,7 @@ def _finalize_and_report(session_dir, session_id, rec_dir, blocks, transcript,
                 seen.add(k)
                 ents.append(e)
     if ents:
-        insights["entities"] = ents[:25]
+        insights["entities"] = ents[:60]
 
     # Web-grounded enrichment (entities + background + to-do resources), before we persist.
     _day_research(session_dir, insights, log)
