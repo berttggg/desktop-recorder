@@ -145,6 +145,7 @@ UPLOAD_ATTEMPTS = max(1, int(os.environ.get("GEMINI_UPLOAD_ATTEMPTS", "3")))
 MAX_TOKENS_SEG = int(os.environ.get("GEMINI_MAX_TOKENS_SEG", "8192"))
 MAX_TOKENS_REDUCE = int(os.environ.get("GEMINI_MAX_TOKENS_REDUCE", "2048"))
 MAX_TOKENS_OVERVIEW = int(os.environ.get("GEMINI_MAX_TOKENS_OVERVIEW", "700"))
+MAX_TOKENS_PERIOD = int(os.environ.get("GEMINI_MAX_TOKENS_PERIOD", "1200"))
 
 _MEDIA_RES = {
     "low": "MEDIA_RESOLUTION_LOW",
@@ -153,43 +154,53 @@ _MEDIA_RES = {
 }.get(os.environ.get("GEMINI_MEDIA_RESOLUTION", "low").lower(), "MEDIA_RESOLUTION_LOW")
 
 
-SEG_PROMPT = """This is a {secs}-second clip of a screen recording (video plus
-its audio). Do TWO things and reply with ONE JSON object and no prose:
+SEG_PROMPT = """This is a {secs}-second clip of a screen recording — VIDEO (the
+screen) plus its AUDIO. Use BOTH tracks: read what is on screen, AND listen to
+what is said. Cross-reference them (match speech to what's happening on screen),
+but also capture what only ONE track shows — e.g. audio from a call or a video
+while the screen is on something else, or on-screen work done in silence. Never
+ignore the audio just because the screen is static, or the screen just because
+it's quiet.
 
-1) Segment the distinct activities the user worked on, in time order.
-2) Transcribe the speech you can hear — the user, people on a call, or any
-   video/audio they are playing — as completely and accurately as you can.
+Reply with ONE JSON object and no prose. Write every summary field (activity,
+app, detail, todos) in ENGLISH even if the speech is in another language; keep
+the transcript verbatim in whatever language was actually spoken.
 
 {{"blocks":[
   {{"start": <seconds from the start of THIS clip>,
     "end": <seconds from the start of THIS clip>,
     "activity": "<=5 word label of the main task",
-    "app": "main app or website",
-    "detail": "one sentence on what happened",
-    "todos": ["a task the user explicitly said they still need to do"]}}
+    "app": "main app, website, or meeting/app being used",
+    "detail": "1-2 sentences: what happened ON SCREEN and what was DISCUSSED; name the specific files, URLs/sites, tools and people involved, and any decision or question raised",
+    "todos": ["a concrete task someone said still needs doing — include any deadline or owner mentioned"]}}
  ],
  "transcript":[
   {{"t": <seconds from the start of THIS clip when this line starts>,
-    "text": "the exact words spoken, verbatim"}}
+    "text": "the exact words spoken, verbatim, in the original language"}}
  ]}}
-Use 1-6 blocks. Make the transcript NEAR-VERBATIM and split it into short lines
-(about one sentence each), each with the time it starts; capture everything
-spoken, not a summary. Use [] for transcript only if there is genuinely no
-speech. Only state what the video/audio support; use "" or [] when unknown."""
+Use 1-6 blocks. Make the transcript NEAR-VERBATIM, split into short one-sentence
+lines each with its start time; capture everything spoken, not a summary — in a
+meeting/call note who is speaking when it's clear ("Alice: …"). Use [] for
+transcript only if there is genuinely no speech. Ground everything in what the
+video/audio actually show; use "" or [] when unknown."""
 
-REDUCE_PROMPT = """You are writing a concise daily work journal from a log of what
-a user did on their computer. Each line is: time | activity | app | detail | todos.
+REDUCE_PROMPT = """You are writing a precise daily work journal from a log of one
+person's computer activity. Each line is: time | activity | app | detail | todos.
+A day may mix meetings/calls, coding/technical work, research/browsing and
+general work — handle whichever appear.
 
-Reply with ONE JSON object (no prose, no markdown):
-{{"summary":"A specific 4-6 sentence narrative of the day: the main threads of
-   work, what actually got done, and roughly how the time was spent. Name the
-   real projects, files, apps, sites and people that appear. Avoid vague filler
-   like 'various tasks' or 'worked on the computer'.",
-  "accomplishments":["concrete outcomes the user completed or moved forward,
-     written as results (what now exists, works, or was decided), most important
-     first"],
-  "action_items":["specific things the user still needs to do or follow up on"],
-  "topics":["2-6 canonical project/topic names that organise the day"]}}
+Reply with ONE JSON object, written in ENGLISH (no prose, no markdown):
+{{"summary":"A specific 5-8 sentence narrative of the day: the main threads of
+   work and roughly how time was spent, naming the real projects, files, apps,
+   sites, tools and people involved. Call out key decisions made, questions
+   raised, and notable things discussed in meetings. No vague filler like
+   'various tasks'.",
+  "accomplishments":["concrete outcomes completed or moved forward, written as
+     results (what now exists, works, or was decided), most important first"],
+  "action_items":["specific things still to do or follow up on, including any
+     deadline or owner that was mentioned"],
+  "topics":["3-7 canonical names that organise the day: projects/topics, plus key
+     people or tools"]}}
 Ground everything ONLY in the log. Merge duplicates and near-duplicates. If the
 day is light, keep the lists short rather than padding them.
 
@@ -197,15 +208,29 @@ Activity log:
 {blocks}"""
 
 
-OVERVIEW_PROMPT = """Below are short summaries of a user's most recent days of
+OVERVIEW_PROMPT = """Below are short summaries of one person's most recent days of
 computer work (newest first), plus their currently-open to-dos.
 
-Write a brief, helpful overview to orient the user — plain text, no markdown
-headings, about 4-7 sentences. Cover the through-lines across these days, what is
-progressing, what was finished recently, and what still needs attention. Be
-specific and name the real projects/topics. Finish with one short line that
-starts with "Focus next:" naming the single most important open thing to pick up.
-Ground everything only in what is given; do not invent.
+Write a brief orientation in ENGLISH — plain text, no markdown headings, about
+5-7 sentences. Cover the through-lines across these days, what is progressing,
+what was finished recently, and what still needs attention; name the real
+projects, people and tools. Finish with one line that starts with "Focus next:"
+naming the single most important open thing to pick up. Ground everything only in
+what is given; do not invent.
+
+{context}"""
+
+
+PERIOD_PROMPT = """Below are daily work summaries from the last {label} (newest
+first), with their accomplishments and the to-dos still open.
+
+Write a {label} review in ENGLISH — plain text, no markdown headings, a few tight
+paragraphs. Group the days into threads rather than listing each one, and cover:
+the main themes and projects of the {label}; what was actually accomplished; how
+effort was spread; and what is still open or slipping. Be specific — name the
+real projects, people and tools. Finish with one line starting
+"Focus next {label}:" giving the single highest priority. Ground everything only
+in what is given; do not invent.
 
 {context}"""
 
@@ -1114,4 +1139,20 @@ def summarize_overview(context, log=print):
         return (_resp_text(resp) or "").strip()
     except Exception as e:
         log(f"Gemini overview error: {e}")
+        return ""
+
+
+def summarize_period(context, label, log=print):
+    """Model-written weekly/monthly review for the dashboard. ``label`` is "week"
+    or "month". Returns plain text, or '' on any failure."""
+    context = (context or "").strip()
+    if not context:
+        return ""
+    prompt = PERIOD_PROMPT.format(label=label, context=context[:18000])
+    try:
+        resp = _generate(_client(), REDUCE_MODEL, [prompt],
+                         _text_config(MAX_TOKENS_PERIOD), log, label)
+        return (_resp_text(resp) or "").strip()
+    except Exception as e:
+        log(f"Gemini {label} summary error: {e}")
         return ""

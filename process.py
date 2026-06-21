@@ -302,9 +302,11 @@ def process_all_pending(rec_dir, ffmpeg, log=print, should_stop=None,
     if completed:
         try:
             insights.build_kb_overview(rec_dir, force=True, log=log)
+            insights.build_period_insights(rec_dir, 7, "week", force=True, log=log)
+            insights.build_period_insights(rec_dir, 30, "month", force=True, log=log)
             insights.build_dashboard(rec_dir, log=log)
         except Exception as e:
-            log(f"KB overview refresh skipped ({e}).")
+            log(f"Overview/period refresh skipped ({e}).")
 
     log(f"Done. {completed}/{len(pend)} recording(s) fully processed"
         + ("; some have segments still pending (retry when online)."

@@ -737,6 +737,76 @@ def _read_kb_overview(rec_dir):
         return "", ""
 
 
+def build_period_insights(rec_dir, days, label, force=False, log=print):
+    """Generate + cache a model-written weekly/monthly review. ``days`` is the
+    look-back window (7 = week, 30 = month), ``label`` is "week"/"month". Cached
+    in <rec_dir>/period_<label>.json, hash-gated on the inputs so the model only
+    runs when the days/to-dos in the window change. Returns text ('' if n/a)."""
+    path = kb.db_path(rec_dir)
+    sessions = kb.recent_sessions(path, limit=200)
+    cutoff = (dt.date.today() - dt.timedelta(days=days)).isoformat()
+    recent = [s for s in sessions if (s.get("date") or "") >= cutoff]
+    todos = _dedup_todo_rows(kb.open_action_items(path))
+    cache_path = os.path.join(rec_dir, f"period_{label}.json")
+
+    sig_src = json.dumps(
+        [label] + [(s.get("date"), s.get("id"), s.get("summary")) for s in recent]
+        + [t.get("text") for t in todos], ensure_ascii=False, sort_keys=True)
+    sig = hashlib.sha1(sig_src.encode("utf-8")).hexdigest()
+
+    if not force:
+        try:
+            with open(cache_path, encoding="utf-8") as f:
+                cached = json.load(f)
+            if cached.get("sig") == sig:
+                return cached.get("text", "")
+        except Exception:
+            pass
+
+    if not recent:
+        return ""
+
+    lines = [f"Days in the last {label} (newest first):"]
+    for s in recent[:40]:
+        summ = (s.get("summary") or "").strip()
+        if summ:
+            lines.append(f"- {s.get('date','')}: {summ}")
+    if todos:
+        lines += ["", "Still-open to-dos:"]
+        for t in todos[:30]:
+            txt = (t.get("text") or "").strip()
+            if txt:
+                lines.append(f"- {txt}")
+
+    text = ""
+    try:
+        import gemini
+        if gemini.available():
+            log(f"Summarizing your {label}…")
+            text = gemini.summarize_period("\n".join(lines), label, log=log)
+    except Exception as e:
+        log(f"{label.capitalize()} insight skipped ({e}).")
+        text = ""
+
+    if text:
+        try:
+            analyze.atomic_write_json(cache_path, {
+                "sig": sig, "text": text,
+                "generated": dt.datetime.now().isoformat(timespec="seconds")})
+        except Exception:
+            pass
+    return text
+
+
+def _read_period(rec_dir, label):
+    try:
+        with open(os.path.join(rec_dir, f"period_{label}.json"), encoding="utf-8") as f:
+            d = json.load(f)
+        return (d.get("text") or "").strip(), (d.get("generated") or "")
+    except Exception:
+        return "", ""
+
+
 def build_dashboard(rec_dir, log=print):
     esc = html.escape
     path = kb.db_path(rec_dir)
@@ -763,6 +833,18 @@ def build_dashboard(rec_dir, log=print):
                 f"updated {esc(ov_when[:16].replace('T', ' '))}</span>") if ov_when else ""
         p.append(f"<div class='card'><h2>Overview{when}</h2>"
                  f"<div class='lead'>{paras}</div></div>")
+
+    # Weekly + monthly roll-ups (model-written; cached, refreshed each Process run)
+    for _lbl, _head in (("week", "This week"), ("month", "This month")):
+        _txt, _when = _read_period(rec_dir, _lbl)
+        if not _txt:
+            continue
+        _paras = "".join(f"<p style='margin:6px 0'>{esc(ln)}</p>"
+                         for ln in _txt.split("\n") if ln.strip())
+        _w = (f" &nbsp;·&nbsp; <span style='text-transform:none;font-weight:400'>"
+              f"updated {esc(_when[:16].replace('T', ' '))}</span>") if _when else ""
+        p.append(f"<div class='card f'><h2>{_head}{_w}</h2>"
+                 f"<div class='lead'>{_paras}</div></div>")
 
     p.append("<div class='searchbar'>"
              "<input class='search' id='q' autocomplete='off' spellcheck='false' "
