@@ -427,6 +427,48 @@ def analyze_session(session_dir, ffmpeg, rec_dir, meta=None, log=print):
                                 transcript, total_dur, insights, meta, tmp_dirs, log)
 
 
+def _day_research(session_dir, insights, log=print):
+    """Web-grounded enrichment for one day: background on the day's topics + a
+    resource/how-to for each open to-do, with sources. Stored at
+    insights['research'] = {text, sources, sig}. Gated by gemini.research_enabled;
+    hash-cached on summary+topics+to-dos so re-processing a day doesn't re-spend
+    search quota. Best-effort — any failure just leaves no research."""
+    try:
+        import gemini
+        if not gemini.research_enabled() or not gemini.available():
+            return
+    except Exception:
+        return
+    summary = (insights.get("summary") or "").strip()
+    todos = [str(t) for t in (insights.get("action_items") or [])]
+    topics = [str(t) for t in (insights.get("topics") or [])]
+    if not summary and not todos:
+        return
+    sig = hashlib.sha1(json.dumps([summary, topics, todos], ensure_ascii=False,
+                                  sort_keys=True).encode("utf-8")).hexdigest()
+    try:    # reuse prior research when the inputs are unchanged (no re-spend)
+        with open(os.path.join(session_dir, "insights.json"), encoding="utf-8") as f:
+            prev = json.load(f).get("research")
+        if isinstance(prev, dict) and prev.get("sig") == sig and prev.get("text"):
+            insights["research"] = prev
+            return
+    except Exception:
+        pass
+    ctx = []
+    if summary:
+        ctx.append("Summary: " + summary)
+    if topics:
+        ctx.append("Topics: " + ", ".join(topics))
+    if todos:
+        ctx.append("Open to-dos:\n" + "\n".join("- " + t for t in todos))
+    log("Researching the day on the web (Google Search grounding)…")
+    text, sources = gemini.research(
+        gemini.DAY_RESEARCH_PROMPT.format(context="\n".join(ctx)), log=log)
+    if text:
+        insights["research"] = {"text": text, "sources": sources, "sig": sig}
+        log(f"Web research added ({len(sources)} source(s)).")
+
+
 def _finalize_and_report(session_dir, session_id, rec_dir, blocks, transcript,
                          total_dur, insights, meta, tmp_dirs, log):
     """Shared back half of analysis: time breakdown, write transcript/insights
@@ -435,6 +477,9 @@ def _finalize_and_report(session_dir, session_id, rec_dir, blocks, transcript,
     time_breakdown = _time_breakdown(blocks)
     insights["time_breakdown"] = time_breakdown
     runs = _runs(blocks)
+
+    # Web-grounded enrichment (background + to-do resources), before we persist.
+    _day_research(session_dir, insights, log)
 
     # transcript + insights files — written atomically (temp + os.replace) so a
     # shutdown mid-write can never corrupt the previous good copy.
@@ -711,6 +756,21 @@ def _render_session_report(session_dir, session_id, insights, runs, time_breakdo
         "<ul class='clean todo'>" + "".join(f"<li>{esc(str(a))}</li>" for a in todo) + "</ul>"
         if todo else "<p class='empty'>No open items detected.</p>") + "</div>")
     p.append("</div>")
+
+    research = insights.get("research") or {}
+    rtext = (research.get("text") or "").strip()
+    if rtext:
+        paras = "".join(f"<p>{esc(ln)}</p>" for ln in rtext.split("\n") if ln.strip())
+        srcs = [s for s in (research.get("sources") or []) if s.get("uri")]
+        slist = ""
+        if srcs:
+            items = "".join(
+                f"<li><a href='{esc(s['uri'])}'>{esc(s.get('title') or s['uri'])}</a></li>"
+                for s in srcs)
+            slist = (f"<details><summary>Sources ({len(srcs)})</summary>"
+                     f"<ul class='clean'>{items}</ul></details>")
+        p.append("<div class='card'><h2>Research &amp; resources (web)</h2>"
+                 f"<div class='lead'>{paras}</div>{slist}</div>")
 
     if time_breakdown:
         p.append("<div class='card'><h2>Where the time went</h2>" + _bar(time_breakdown, esc) + "</div>")

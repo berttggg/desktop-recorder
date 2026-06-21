@@ -146,6 +146,7 @@ MAX_TOKENS_SEG = int(os.environ.get("GEMINI_MAX_TOKENS_SEG", "8192"))
 MAX_TOKENS_REDUCE = int(os.environ.get("GEMINI_MAX_TOKENS_REDUCE", "2048"))
 MAX_TOKENS_OVERVIEW = int(os.environ.get("GEMINI_MAX_TOKENS_OVERVIEW", "700"))
 MAX_TOKENS_PERIOD = int(os.environ.get("GEMINI_MAX_TOKENS_PERIOD", "1200"))
+MAX_TOKENS_RESEARCH = int(os.environ.get("GEMINI_MAX_TOKENS_RESEARCH", "1600"))
 
 _MEDIA_RES = {
     "low": "MEDIA_RESOLUTION_LOW",
@@ -233,6 +234,30 @@ real projects, people and tools. Finish with one line starting
 in what is given; do not invent.
 
 {context}"""
+
+
+DAY_RESEARCH_PROMPT = """You can search the web. Below is a summary of what someone
+did at their computer today, their main topics, and their open to-dos. Add useful
+OUTSIDE context — in ENGLISH, plain text, no markdown headings:
+
+1) A few sentences of relevant background or recent developments on the day's
+   topics / tools / people — only what genuinely adds value; skip if nothing.
+2) For each open to-do, one concrete pointer to help get it done — a specific
+   resource, doc, or approach — with a link.
+
+Cite the pages you used. Keep it tight. Here is the day:
+
+{context}"""
+
+
+DEEPDIVE_PROMPT = """You can search the web. Research the following topic or
+question thoroughly and write a clear, well-organised brief in ENGLISH (plain
+text, short paragraphs separated by blank lines, no markdown headings). Cover the
+key facts, the current state / recent developments, and practical takeaways; be
+specific and cite the pages you used.
+
+Topic / question:
+{query}"""
 
 
 # --------------------------------------------------------------------------
@@ -753,6 +778,18 @@ def _text_config(max_tokens):
     )
 
 
+def _grounded_config(max_tokens):
+    """Config for a WEB-GROUNDED plain-text reply: attaches the Google Search
+    tool so the model searches the web and cites sources. No JSON mime — forced
+    JSON conflicts with tool use."""
+    from google.genai import types
+    return types.GenerateContentConfig(
+        temperature=0.3,
+        max_output_tokens=max_tokens,
+        tools=[types.Tool(google_search=types.GoogleSearch())],
+    )
+
+
 def _video_part(f):
     """A video Part referencing an uploaded file. We deliberately do NOT set
     video_metadata(start/end offset): the Gemini API rejects clip-offset
@@ -1156,3 +1193,52 @@ def summarize_period(context, label, log=print):
     except Exception as e:
         log(f"Gemini {label} summary error: {e}")
         return ""
+
+
+def research_enabled():
+    """Whether web-grounded research runs. Env GEMINI_RESEARCH (0/1) > settings
+    'research' > default ON (the user opted in)."""
+    v = os.environ.get("GEMINI_RESEARCH", "").strip().lower()
+    if v in ("0", "false", "no", "off"):
+        return False
+    if v in ("1", "true", "yes", "on"):
+        return True
+    s = _read_settings().get("research")
+    return s if isinstance(s, bool) else True
+
+
+def _grounding_sources(resp):
+    """Extract [{title, uri}] from a grounded response's grounding metadata."""
+    out, seen = [], set()
+    try:
+        for c in (getattr(resp, "candidates", None) or []):
+            gm = getattr(c, "grounding_metadata", None)
+            for ch in (getattr(gm, "grounding_chunks", None) or []):
+                w = getattr(ch, "web", None)
+                uri = getattr(w, "uri", None) if w else None
+                if not uri or uri in seen:
+                    continue
+                seen.add(uri)
+                out.append({"title": getattr(w, "title", None) or
+                            getattr(w, "domain", None) or uri, "uri": uri})
+    except Exception:
+        pass
+    return out
+
+
+def research(prompt, log=print, max_tokens=None):
+    """Web-grounded (Google Search) generation. Returns ``(text, sources)`` with
+    sources = [{title, uri}]. NEVER raises — returns ('', []) on any failure so
+    callers degrade gracefully (e.g. free-tier grounding quota exhausted)."""
+    prompt = (prompt or "").strip()
+    if not prompt:
+        return "", []
+    model = os.environ.get("GEMINI_RESEARCH_MODEL", "").strip() or REDUCE_MODEL
+    try:
+        resp = _generate(_client(), model, [prompt],
+                         _grounded_config(max_tokens or MAX_TOKENS_RESEARCH),
+                         log, "research")
+        return (_resp_text(resp) or "").strip(), _grounding_sources(resp)
+    except Exception as e:
+        log(f"Gemini research (web search) error: {e}")
+        return "", []

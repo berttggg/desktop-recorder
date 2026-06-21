@@ -402,6 +402,17 @@ class RecorderApp:
         self.proxy_entry.bind("<FocusOut>", self._apply_proxy)
         self._applied_proxy = self.proxy_var.get().strip()
 
+        # ---- Deep dive (web-grounded research on a topic / question) ------
+        ttk.Label(ana, text="Deep dive:").grid(row=6, column=0, sticky="w",
+                                               padx=(10, 4), pady=(0, 10))
+        self.deepdive_var = tk.StringVar()
+        self.deepdive_entry = ttk.Entry(ana, textvariable=self.deepdive_var)
+        self.deepdive_entry.grid(row=6, column=1, sticky="we", padx=(4, 4), pady=(0, 10))
+        self.deepdive_entry.bind("<Return>", self.deep_dive)
+        self.deepdive_btn = ttk.Button(ana, text="Research", command=self.deep_dive)
+        self.deepdive_btn.grid(row=6, column=2, sticky="w", padx=(0, 10), pady=(0, 10))
+        self._researching = False
+
         # ---- Action buttons ----------------------------------------------
         btns = ttk.Frame(root)
         btns.pack(fill="x", padx=14, pady=(0, 8))
@@ -462,6 +473,9 @@ class RecorderApp:
                  "Google calls (analysis, reduce, embeddings), applies right away, and is "
                  "remembered. A RECORDER_PROXY or HTTPS_PROXY environment variable, if set, "
                  "overrides this box.")
+        _ToolTip(self.deepdive_entry, "Type a topic or question, then Research — Gemini searches "
+                 "the web (Google Search grounding) and opens a brief with cited sources. Uses "
+                 "your Gemini search quota.")
         _ToolTip(self.process_btn, "Upload + analyze every recording not yet processed (across "
                  "days). Resumable: each segment is saved as it finishes, so a crash/shutdown "
                  "picks up where it left off, and failed uploads simply retry next time.")
@@ -614,6 +628,78 @@ class RecorderApp:
                 "No dashboard yet",
                 "Analyze a recording first — the dashboard is built from your "
                 "analyzed sessions.")
+
+    # ---- Deep dive (on-demand web-grounded research) ----------------------
+    def deep_dive(self, event=None):
+        """Research the typed topic/question on the web (Google Search grounding)
+        and open a brief with sources."""
+        q = (self.deepdive_var.get() or "").strip()
+        if not q or getattr(self, "_researching", False):
+            return
+        try:
+            import gemini
+            if not gemini.available():
+                self.write("Deep dive needs the Gemini backend + key "
+                           "(run 'Use Gemini (free).bat' and set GEMINI_API_KEY).")
+                return
+        except Exception:
+            self.write("Deep dive needs google-genai installed.")
+            return
+        self._researching = True
+        self.deepdive_btn.config(state="disabled")
+        self.status_lbl.config(foreground=_INFO)
+        self.status.set("Researching…")
+        threading.Thread(target=self._deep_dive_worker, args=(q,), daemon=True).start()
+
+    def _deep_dive_worker(self, query):
+        log = lambda m: self.root.after(0, self.write, m)
+        try:
+            import gemini
+            log(f"Deep dive: researching \"{query}\" on the web…")
+            text, sources = gemini.research(
+                gemini.DEEPDIVE_PROMPT.format(query=query), log=log)
+            if not text:
+                log("Deep dive: no result (web search unavailable or quota spent).")
+                return
+            outdir = os.path.join(REC_DIR, "research")
+            os.makedirs(outdir, exist_ok=True)
+            slug = re.sub(r"[^a-zA-Z0-9]+", "-", query).strip("-").lower()[:40] or "topic"
+            ts = dt.datetime.now().strftime("%Y%m%d_%H%M%S")
+            out = os.path.join(outdir, f"{ts}_{slug}.html")
+            analyze.atomic_write_text(out, self._render_research_html(query, text, sources))
+            log(f"Deep dive ready ({len(sources)} source(s)) — opening.")
+            try:
+                os.startfile(out)
+            except Exception:
+                pass
+        except Exception as e:
+            log(f"Deep dive error: {e}")
+        finally:
+            self._researching = False
+            self.root.after(0, lambda: self.status_lbl.config(foreground=_OK))
+            self.root.after(0, lambda: self.status.set("Ready."))
+            self.root.after(0, lambda: self.deepdive_btn.config(state="normal"))
+
+    def _render_research_html(self, query, text, sources):
+        import html as _html
+        esc = _html.escape
+        paras = "".join(f"<p>{esc(ln)}</p>" for ln in (text or "").split("\n") if ln.strip())
+        items = "".join(
+            f"<li><a href='{esc(s.get('uri', ''))}'>{esc(s.get('title') or s.get('uri', ''))}</a></li>"
+            for s in (sources or []) if s.get("uri"))
+        slist = (f"<div class='card'><h2>Sources</h2><ul class='clean'>{items}</ul></div>"
+                 if items else "")
+        try:
+            import insights
+            css = insights.CSS
+        except Exception:
+            css = ""
+        return (f"<!doctype html><html><head><meta charset='utf-8'>"
+                f"<title>Deep dive: {esc(query)}</title><style>{css}</style></head>"
+                f"<body><div class='wrap'><h1>Deep dive</h1>"
+                f"<div class='meta'>{esc(query)}</div>"
+                f"<div class='card'><div class='lead'>{paras}</div></div>{slist}"
+                f"</div></body></html>")
 
     # ---- Model picker labels (dashboard display names <-> model ids) ------
     def _build_model_options(self, ids):
