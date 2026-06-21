@@ -37,6 +37,17 @@ of thought, and can answer "what was I working on last Tuesday afternoon?" by
   too**, adding outside trends and sources. A **Deep dive** box researches any
   topic/question on demand into a sourced brief. (Sends those queries to Google;
   the app spends search quota generously for richer insight.)
+- **Goes deep when it matters (Deep Research agent)** — beyond quick search
+  grounding, the app can drive Google's **Deep Research agent** (the same one in
+  the AI-Studio dashboard) — a multi-step agent that runs *many* web searches over
+  several minutes and returns a long, deeply-sourced report. It's used for the
+  **Deep dive** box, the **per-day / weekly / monthly** research, and a one-click
+  **"Deep-research" an entity** button (escalate, say, an account you followed to
+  a full investigation). Every spot **falls back to quick Google Search grounding**
+  if the agent is off, unavailable, or times out — so reports always build. Toggle
+  it with the **"Use Deep Research agent"** checkbox (on by default; turn off if
+  the multi-minute agent makes batch processing too slow). Requires
+  `google-genai >= 2.x` (installed via `requirements.txt`).
 - **Records now, uploads later** — recording only captures to disk in crash-safe
   ~10-minute segments; nothing is sent to the cloud until you click **Process
   recordings**. Ideal for spotty or restricted networks: record offline, then

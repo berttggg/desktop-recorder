@@ -413,6 +413,30 @@ class RecorderApp:
         self.deepdive_btn.grid(row=6, column=2, sticky="w", padx=(0, 10), pady=(0, 10))
         self._researching = False
 
+        # ---- Deep Research agent toggle ----------------------------------
+        # When on (default) the premium Deep Research agent is used for the deep
+        # dive, the per-entity escalation, and the auto day/week/month research,
+        # each falling back to quick Google Search grounding. Turn off if the
+        # multi-minute agent makes batch processing too slow.
+        self.deep_var = tk.BooleanVar(value=bool(self._settings.get("deep_research", True)))
+        self.deep_chk = ttk.Checkbutton(
+            ana, variable=self.deep_var, command=self._apply_deep,
+            text="Use Deep Research agent (deepest, slow) — else quick web grounding")
+        self.deep_chk.grid(row=7, column=0, columnspan=3, sticky="w", padx=10, pady=(0, 6))
+        self._apply_deep(announce=False)
+
+        # ---- Deep-research one noticed entity (escalate to the full agent) -
+        ttk.Label(ana, text="Entity:").grid(row=8, column=0, sticky="w",
+                                            padx=(10, 4), pady=(0, 10))
+        self.entity_var = tk.StringVar()
+        self.entity_combo = ttk.Combobox(ana, textvariable=self.entity_var,
+                                         values=self._recent_entities(),
+                                         postcommand=self._refresh_entities)
+        self.entity_combo.grid(row=8, column=1, sticky="we", padx=(4, 4), pady=(0, 10))
+        self.entity_combo.bind("<Return>", self.research_entity)
+        self.entity_btn = ttk.Button(ana, text="Deep-research", command=self.research_entity)
+        self.entity_btn.grid(row=8, column=2, sticky="w", padx=(0, 10), pady=(0, 10))
+
         # ---- Action buttons ----------------------------------------------
         btns = ttk.Frame(root)
         btns.pack(fill="x", padx=14, pady=(0, 8))
@@ -655,8 +679,8 @@ class RecorderApp:
         log = lambda m: self.root.after(0, self.write, m)
         try:
             import gemini
-            log(f"Deep dive: researching \"{query}\" on the web…")
-            text, sources = gemini.research(
+            log(f"Deep dive: researching \"{query}\"…")
+            text, sources, mode = gemini.research_best(
                 gemini.DEEPDIVE_PROMPT.format(query=query), log=log)
             if not text:
                 log("Deep dive: no result (web search unavailable or quota spent).")
@@ -666,8 +690,8 @@ class RecorderApp:
             slug = re.sub(r"[^a-zA-Z0-9]+", "-", query).strip("-").lower()[:40] or "topic"
             ts = dt.datetime.now().strftime("%Y%m%d_%H%M%S")
             out = os.path.join(outdir, f"{ts}_{slug}.html")
-            analyze.atomic_write_text(out, self._render_research_html(query, text, sources))
-            log(f"Deep dive ready ({len(sources)} source(s)) — opening.")
+            analyze.atomic_write_text(out, self._render_research_html(query, text, sources, mode))
+            log(f"Deep dive ready via {mode or 'web'} ({len(sources)} source(s)) — opening.")
             try:
                 os.startfile(out)
             except Exception:
@@ -680,7 +704,7 @@ class RecorderApp:
             self.root.after(0, lambda: self.status.set("Ready."))
             self.root.after(0, lambda: self.deepdive_btn.config(state="normal"))
 
-    def _render_research_html(self, query, text, sources):
+    def _render_research_html(self, query, text, sources, mode=""):
         import html as _html
         esc = _html.escape
         paras = "".join(f"<p>{esc(ln)}</p>" for ln in (text or "").split("\n") if ln.strip())
@@ -689,6 +713,7 @@ class RecorderApp:
             for s in (sources or []) if s.get("uri"))
         slist = (f"<div class='card'><h2>Sources</h2><ul class='clean'>{items}</ul></div>"
                  if items else "")
+        badge = {"deep": " · Deep Research agent", "grounded": " · Google Search"}.get(mode, "")
         try:
             import insights
             css = insights.CSS
@@ -697,9 +722,112 @@ class RecorderApp:
         return (f"<!doctype html><html><head><meta charset='utf-8'>"
                 f"<title>Deep dive: {esc(query)}</title><style>{css}</style></head>"
                 f"<body><div class='wrap'><h1>Deep dive</h1>"
-                f"<div class='meta'>{esc(query)}</div>"
+                f"<div class='meta'>{esc(query)}{badge}</div>"
                 f"<div class='card'><div class='lead'>{paras}</div></div>{slist}"
                 f"</div></body></html>")
+
+    def _apply_deep(self, announce=True):
+        """Toggle the Deep Research agent (vs. quick grounding). Writes both the
+        env var (immediate, picked up by the in-process worker) and settings
+        (persisted). gemini.deep_research_enabled() reads either."""
+        on = bool(self.deep_var.get())
+        os.environ["GEMINI_DEEP_RESEARCH"] = "1" if on else "0"
+        self._settings["deep_research"] = on
+        _save_settings(self._settings)
+        if announce:
+            self.write(f"Deep Research agent {'ON' if on else 'OFF'} "
+                       f"({'deepest, slower' if on else 'quick web grounding'}).")
+
+    def _recent_entities(self, limit=40):
+        """Notable entities from the most recent processed day(s), for the
+        escalation picker. Best-effort — empty until something is processed."""
+        out, seen = [], set()
+        try:
+            files = sorted(glob.glob(os.path.join(REC_DIR, "*", "insights.json")),
+                           key=os.path.getmtime, reverse=True)
+            for fp in files[:5]:
+                with open(fp, encoding="utf-8") as f:
+                    for e in (json.load(f).get("entities") or []):
+                        e = str(e).strip()
+                        if e and e.lower() not in seen:
+                            seen.add(e.lower())
+                            out.append(e)
+                if len(out) >= limit:
+                    break
+        except Exception:
+            pass
+        return out[:limit]
+
+    def _refresh_entities(self):
+        try:
+            self.entity_combo.config(values=self._recent_entities())
+        except Exception:
+            pass
+
+    def _latest_day_summary(self):
+        try:
+            files = sorted(glob.glob(os.path.join(REC_DIR, "*", "insights.json")),
+                           key=os.path.getmtime, reverse=True)
+            if files:
+                with open(files[0], encoding="utf-8") as f:
+                    return (json.load(f).get("summary") or "")[:600]
+        except Exception:
+            pass
+        return ""
+
+    def research_entity(self, event=None):
+        """Escalate one noticed entity (e.g. @serenity, a ticker) to the full Deep
+        Research agent (falls back to grounding), and open a sourced brief."""
+        ent = (self.entity_var.get() or "").strip()
+        if not ent or getattr(self, "_researching", False):
+            return
+        try:
+            import gemini
+            if not gemini.available():
+                self.write("Entity research needs the Gemini backend + key "
+                           "(run 'Use Gemini (free).bat' and set GEMINI_API_KEY).")
+                return
+        except Exception:
+            self.write("Entity research needs google-genai installed.")
+            return
+        self._researching = True
+        self.entity_btn.config(state="disabled")
+        self.deepdive_btn.config(state="disabled")
+        self.status_lbl.config(foreground=_INFO)
+        self.status.set("Researching entity…")
+        threading.Thread(target=self._entity_worker, args=(ent,), daemon=True).start()
+
+    def _entity_worker(self, entity):
+        log = lambda m: self.root.after(0, self.write, m)
+        try:
+            import gemini
+            ctx = self._latest_day_summary()
+            log(f"Deep-researching entity: {entity}")
+            text, sources, mode = gemini.research_best(
+                gemini.ENTITY_RESEARCH_PROMPT.format(entity=entity, context=ctx), log=log)
+            if not text:
+                log("Entity research: no result (web search unavailable or quota spent).")
+                return
+            outdir = os.path.join(REC_DIR, "research")
+            os.makedirs(outdir, exist_ok=True)
+            slug = re.sub(r"[^a-zA-Z0-9]+", "-", entity).strip("-").lower()[:40] or "entity"
+            ts = dt.datetime.now().strftime("%Y%m%d_%H%M%S")
+            out = os.path.join(outdir, f"{ts}_entity_{slug}.html")
+            analyze.atomic_write_text(
+                out, self._render_research_html(f"Entity: {entity}", text, sources, mode))
+            log(f"Entity brief ready via {mode or 'web'} ({len(sources)} source(s)) — opening.")
+            try:
+                os.startfile(out)
+            except Exception:
+                pass
+        except Exception as e:
+            log(f"Entity research error: {e}")
+        finally:
+            self._researching = False
+            self.root.after(0, lambda: self.status_lbl.config(foreground=_OK))
+            self.root.after(0, lambda: self.status.set("Ready."))
+            self.root.after(0, lambda: self.entity_btn.config(state="normal"))
+            self.root.after(0, lambda: self.deepdive_btn.config(state="normal"))
 
     # ---- Model picker labels (dashboard display names <-> model ids) ------
     def _build_model_options(self, ids):

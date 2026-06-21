@@ -151,6 +151,18 @@ MAX_TOKENS_RESEARCH = int(os.environ.get("GEMINI_MAX_TOKENS_RESEARCH", "3000"))
 # (each is a separate grounded call). The user has quota headroom — default high.
 RESEARCH_ENTITIES = int(os.environ.get("GEMINI_RESEARCH_ENTITIES", "15"))
 
+# --- Deep Research agent (Interactions API; needs google-genai >= 2.x) -------
+# A premium AGENT (not generate_content) that runs many web searches over several
+# MINUTES and returns a long, cited report. Far deeper than a single grounded
+# call, but slow + paid — so it's used at the deliberate spots (Deep dive, day
+# overview, weekly/monthly roll-ups, per-entity escalation) with Google Search
+# grounding (research()) as the automatic fallback. Valid agents seen on the
+# key: deep-research-{pro-preview-12-2025, preview-04-2026, max-preview-04-2026}.
+DEEP_RESEARCH_AGENT = os.environ.get(
+    "GEMINI_DEEP_RESEARCH_AGENT", "deep-research-max-preview-04-2026").strip()
+DEEP_RESEARCH_TIMEOUT = float(os.environ.get("GEMINI_DEEP_RESEARCH_TIMEOUT", "1200"))
+DEEP_RESEARCH_POLL = float(os.environ.get("GEMINI_DEEP_RESEARCH_POLL", "10"))
+
 _MEDIA_RES = {
     "low": "MEDIA_RESOLUTION_LOW",
     "medium": "MEDIA_RESOLUTION_MEDIUM",
@@ -1212,6 +1224,13 @@ def summarize_period(context, label, log=print):
     if not context:
         return "", []
     prompt = PERIOD_PROMPT.format(label=label, context=context[:18000])
+    # Deep Research agent first (a deep, cited synthesis of the period); fall back
+    # to a single grounded/plain call if it's disabled, unavailable, or empty.
+    if deep_research_enabled():
+        dt_text, dt_src = deep_research(prompt, log=log, label=f"{label} deep research")
+        if dt_text:
+            return dt_text, dt_src
+        log(f"Deep research empty for {label}; using Google Search grounding.")
     try:
         grounded = research_enabled()
     except Exception:
@@ -1273,3 +1292,126 @@ def research(prompt, log=print, max_tokens=None):
     except Exception as e:
         log(f"Gemini research (web search) error: {e}")
         return "", []
+
+
+# --------------------------------------------------------------------------
+# Deep Research agent (Interactions API) + robust deep-then-grounded helper
+# --------------------------------------------------------------------------
+def deep_research_enabled():
+    """Whether the Deep Research AGENT runs (vs. plain Google Search grounding).
+    Env GEMINI_DEEP_RESEARCH (0/1) > settings 'deep_research' > default ON. Needs
+    google-genai >= 2.x; if the SDK is older, deep_research() degrades to ('',[])."""
+    v = os.environ.get("GEMINI_DEEP_RESEARCH", "").strip().lower()
+    if v in ("0", "false", "no", "off"):
+        return False
+    if v in ("1", "true", "yes", "on"):
+        return True
+    s = _read_settings().get("deep_research")
+    return s if isinstance(s, bool) else True
+
+
+def _interaction_sources(it, cap=50):
+    """Best-effort [{title, uri}] from a Deep Research Interaction. Citations are
+    nested (steps[].content[].annotations as URLCitation{url,title}, search-result
+    steps, etc.), so walk the whole dumped model and collect URL-bearing nodes,
+    deduped by url. Robust to schema nesting/drift."""
+    out, seen = [], set()
+    try:
+        data = it.model_dump()
+    except Exception:
+        return out
+
+    def walk(o):
+        if len(out) >= cap:
+            return
+        if isinstance(o, dict):
+            url = o.get("url") or o.get("uri")
+            if isinstance(url, str) and url.startswith("http") and url not in seen:
+                seen.add(url)
+                out.append({"title": o.get("title") or o.get("domain") or url, "uri": url})
+            for v in o.values():
+                walk(v)
+        elif isinstance(o, (list, tuple)):
+            for v in o:
+                walk(v)
+    walk(data)
+    return out
+
+
+def deep_research(query, log=print, timeout=None, poll=None, label="deep research"):
+    """Run Google's Deep Research agent (Interactions API) and return
+    ``(text, sources)``. Runs for MINUTES: create(background=True) then poll
+    get(id) until a terminal status. NEVER raises — returns ('', []) on any
+    failure (no SDK support, no access, timeout, quota) so callers fall back to
+    grounding. Partial output from an 'incomplete'/'budget_exceeded' run is kept."""
+    query = (query or "").strip()
+    if not query:
+        return "", []
+    timeout = float(timeout or DEEP_RESEARCH_TIMEOUT)
+    poll = float(poll or DEEP_RESEARCH_POLL)
+    try:
+        client = _client()
+        interactions = client.interactions          # AttributeError on google-genai < 2.x
+    except Exception as e:
+        log(f"{label}: agent API unavailable ({e}); falling back.")
+        return "", []
+    try:
+        it = interactions.create(input=query, agent=DEEP_RESEARCH_AGENT, background=True)
+    except Exception as e:
+        log(f"{label}: create failed ({e}); falling back.")
+        return "", []
+    iid = getattr(it, "id", None)
+    if not iid:
+        return "", []
+    log(f"{label} started ({DEEP_RESEARCH_AGENT}); this can take several minutes…")
+    deadline = time.time() + timeout
+    terminal = {"completed", "failed", "cancelled", "incomplete", "budget_exceeded"}
+    started, last = time.time(), None
+    status = ""
+    while True:
+        if time.time() > deadline:
+            log(f"{label}: timed out after {int(timeout)}s; falling back.")
+            try:
+                interactions.cancel(iid)
+            except Exception:
+                pass
+            return "", []
+        time.sleep(poll)
+        try:
+            it = interactions.get(iid)
+        except Exception as e:
+            log(f"{label}: poll error ({e}); retrying.")
+            continue
+        status = str(getattr(it, "status", "") or "")
+        if status != last:
+            log(f"  {label}: {status} ({int(time.time() - started)}s)")
+            last = status
+        if status in terminal:
+            break
+    text = (getattr(it, "output_text", None) or "").strip()
+    if status == "completed":
+        log(f"{label}: done in {int(time.time() - started)}s.")
+        return text, _interaction_sources(it)
+    # Partial result from a budget-capped / incomplete run is still useful.
+    if status in ("incomplete", "budget_exceeded") and text:
+        log(f"{label}: ended '{status}' with partial output; keeping it.")
+        return text, _interaction_sources(it)
+    log(f"{label}: ended '{status}'; falling back.")
+    return "", []
+
+
+def research_best(prompt, log=print):
+    """Robustness layer used by the on-demand/escalation paths: try the Deep
+    Research agent first (when enabled), and on any empty/failed result fall back
+    to Google Search grounding — using the SAME prompt for both. Returns
+    ``(text, sources, mode)`` with mode 'deep' | 'grounded' | ''."""
+    prompt = (prompt or "").strip()
+    if not prompt:
+        return "", [], ""
+    if deep_research_enabled():
+        text, src = deep_research(prompt, log=log)
+        if text:
+            return text, src, "deep"
+        log("Falling back to Google Search grounding.")
+    text, src = research(prompt, log=log)
+    return text, src, ("grounded" if text else "")

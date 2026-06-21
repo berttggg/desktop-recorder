@@ -472,12 +472,13 @@ def _day_research(session_dir, insights, log=print):
     if todos:
         ctx.append("Open to-dos:\n" + "\n".join("- " + t for t in todos))
     if ctx:
-        log("Researching the day on the web (Google Search grounding)…")
-        text, sources = gemini.research(
+        log("Researching the day on the web…")
+        text, sources, mode = gemini.research_best(
             gemini.DAY_RESEARCH_PROMPT.format(context="\n".join(ctx)), log=log)
         if text:
             research["text"] = text
             research["sources"] = sources
+            research["mode"] = mode
 
     # Per-entity: research each notable entity with its OWN web search.
     cap = getattr(gemini, "RESEARCH_ENTITIES", 15)
