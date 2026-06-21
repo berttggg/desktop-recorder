@@ -159,7 +159,7 @@ RESEARCH_ENTITIES = int(os.environ.get("GEMINI_RESEARCH_ENTITIES", "15"))
 # grounding (research()) as the automatic fallback. Valid agents seen on the
 # key: deep-research-{pro-preview-12-2025, preview-04-2026, max-preview-04-2026}.
 DEEP_RESEARCH_AGENT = os.environ.get(
-    "GEMINI_DEEP_RESEARCH_AGENT", "deep-research-max-preview-04-2026").strip()
+    "GEMINI_DEEP_RESEARCH_AGENT", "deep-research-preview-04-2026").strip()
 DEEP_RESEARCH_TIMEOUT = float(os.environ.get("GEMINI_DEEP_RESEARCH_TIMEOUT", "1200"))
 DEEP_RESEARCH_POLL = float(os.environ.get("GEMINI_DEEP_RESEARCH_POLL", "10"))
 
@@ -1369,7 +1369,8 @@ def deep_research(query, log=print, timeout=None, poll=None, label="deep researc
     # Heartbeat so a multi-minute run visibly progresses instead of looking frozen
     # (the status sits at 'in_progress' the whole time, so log on a timer too).
     heartbeat = float(os.environ.get("GEMINI_DEEP_RESEARCH_HEARTBEAT", "30"))
-    started, last_status, last_log = time.time(), None, 0.0
+    max_errs = int(os.environ.get("GEMINI_DEEP_RESEARCH_MAX_ERRORS", "3"))
+    started, last_status, last_log, errs = time.time(), None, 0.0, 0
     status = ""
     while True:
         if time.time() > deadline:
@@ -1383,8 +1384,24 @@ def deep_research(query, log=print, timeout=None, poll=None, label="deep researc
         try:
             it = interactions.get(iid)
         except Exception as e:
-            log(f"{label}: poll error ({e}); retrying.")
+            msg = str(e)
+            # A 4xx (esp. 400 invalid_request / invalid argument) is NOT transient
+            # — retrying until the timeout just spams. Give up now so the caller
+            # falls back to grounding. Also cap transient (network / 5xx) errors.
+            non_transient = any(c in msg for c in (
+                "400", "invalid_request", "invalid argument", "401", "403", "404",
+                "PERMISSION_DENIED", "NOT_FOUND", "INVALID_ARGUMENT"))
+            errs += 1
+            if non_transient or errs >= max_errs:
+                log(f"{label}: get failed ({msg[:140]}); giving up — falling back.")
+                try:
+                    interactions.cancel(iid)
+                except Exception:
+                    pass
+                return "", []
+            log(f"{label}: poll error ({msg[:140]}); retry {errs}/{max_errs}.")
             continue
+        errs = 0
         status = str(getattr(it, "status", "") or "")
         now = time.time()
         if status != last_status or (now - last_log) >= heartbeat:
