@@ -431,11 +431,13 @@ def analyze_session(session_dir, ffmpeg, rec_dir, meta=None, log=print):
 
 
 def _day_research(session_dir, insights, log=print):
-    """Web-grounded enrichment for one day: background on the day's topics + a
-    resource/how-to for each open to-do, with sources. Stored at
-    insights['research'] = {text, sources, sig}. Gated by gemini.research_enabled;
-    hash-cached on summary+topics+to-dos so re-processing a day doesn't re-spend
-    search quota. Best-effort — any failure just leaves no research."""
+    """Web-grounded enrichment for one day. Stored at insights['research'] =
+    {text, sources, sig, entities:[{name,text,sources}]}:
+      * a day-level call — background on the day's topics + a resource per to-do;
+      * a SEPARATE grounded call per notable entity (up to RESEARCH_ENTITIES) —
+        who/what it is, what's recent, why it matters, with sources.
+    Gated by gemini.research_enabled; hash-cached on summary+topics+to-dos+entities
+    so re-processing an unchanged day doesn't re-spend quota. Best-effort."""
     try:
         import gemini
         if not gemini.research_enabled() or not gemini.available():
@@ -453,27 +455,45 @@ def _day_research(session_dir, insights, log=print):
     try:    # reuse prior research when the inputs are unchanged (no re-spend)
         with open(os.path.join(session_dir, "insights.json"), encoding="utf-8") as f:
             prev = json.load(f).get("research")
-        if isinstance(prev, dict) and prev.get("sig") == sig and prev.get("text"):
+        if isinstance(prev, dict) and prev.get("sig") == sig and \
+                (prev.get("text") or prev.get("entities")):
             insights["research"] = prev
             return
     except Exception:
         pass
+
+    research = {"sig": sig}
+    # Day-level: topics background + a resource per open to-do.
     ctx = []
     if summary:
         ctx.append("Summary: " + summary)
     if topics:
         ctx.append("Topics: " + ", ".join(topics))
-    if entities:
-        ctx.append("Notable entities seen today (people / accounts / companies / "
-                   "products / tickers):\n" + "\n".join("- " + e for e in entities[:50]))
     if todos:
         ctx.append("Open to-dos:\n" + "\n".join("- " + t for t in todos))
-    log("Researching the day on the web (Google Search grounding)…")
-    text, sources = gemini.research(
-        gemini.DAY_RESEARCH_PROMPT.format(context="\n".join(ctx)), log=log)
-    if text:
-        insights["research"] = {"text": text, "sources": sources, "sig": sig}
-        log(f"Web research added ({len(sources)} source(s)).")
+    if ctx:
+        log("Researching the day on the web (Google Search grounding)…")
+        text, sources = gemini.research(
+            gemini.DAY_RESEARCH_PROMPT.format(context="\n".join(ctx)), log=log)
+        if text:
+            research["text"] = text
+            research["sources"] = sources
+
+    # Per-entity: research each notable entity with its OWN web search.
+    cap = getattr(gemini, "RESEARCH_ENTITIES", 15)
+    ent_out = []
+    for e in entities[:cap]:
+        log(f"  researching: {e}")
+        et, es = gemini.research(
+            gemini.ENTITY_RESEARCH_PROMPT.format(entity=e, context=summary[:600]), log=log)
+        if et:
+            ent_out.append({"name": e, "text": et, "sources": es})
+    if ent_out:
+        research["entities"] = ent_out
+
+    if research.get("text") or research.get("entities"):
+        insights["research"] = research
+        log(f"Web research added (day overview + {len(ent_out)} entity brief(s)).")
 
 
 def _finalize_and_report(session_dir, session_id, rec_dir, blocks, transcript,
@@ -783,18 +803,27 @@ def _render_session_report(session_dir, session_id, insights, runs, time_breakdo
 
     research = insights.get("research") or {}
     rtext = (research.get("text") or "").strip()
-    if rtext:
-        paras = "".join(f"<p>{esc(ln)}</p>" for ln in rtext.split("\n") if ln.strip())
-        srcs = [s for s in (research.get("sources") or []) if s.get("uri")]
-        slist = ""
-        if srcs:
+    rents = research.get("entities") or []
+    if rtext or rents:
+        def _para(t):
+            return "".join(f"<p>{esc(ln)}</p>" for ln in (t or "").split("\n") if ln.strip())
+
+        def _src(sources):
+            ss = [s for s in (sources or []) if s.get("uri")]
+            if not ss:
+                return ""
             items = "".join(
                 f"<li><a href='{esc(s['uri'])}'>{esc(s.get('title') or s['uri'])}</a></li>"
-                for s in srcs)
-            slist = (f"<details><summary>Sources ({len(srcs)})</summary>"
-                     f"<ul class='clean'>{items}</ul></details>")
-        p.append("<div class='card'><h2>Research &amp; resources (web)</h2>"
-                 f"<div class='lead'>{paras}</div>{slist}</div>")
+                for s in ss)
+            return (f"<details><summary>Sources ({len(ss)})</summary>"
+                    f"<ul class='clean'>{items}</ul></details>")
+        inner = ""
+        if rtext:
+            inner += f"<div class='lead'>{_para(rtext)}</div>{_src(research.get('sources'))}"
+        for ent in rents:
+            inner += (f"<h3 style='margin:14px 0 4px'>{esc(ent.get('name', ''))}</h3>"
+                      f"{_para(ent.get('text'))}{_src(ent.get('sources'))}")
+        p.append("<div class='card'><h2>Research &amp; resources (web)</h2>" + inner + "</div>")
 
     if time_breakdown:
         p.append("<div class='card'><h2>Where the time went</h2>" + _bar(time_breakdown, esc) + "</div>")
@@ -952,20 +981,20 @@ def build_period_insights(rec_dir, days, label, force=False, log=print):
             if txt:
                 lines.append(f"- {txt}")
 
-    text = ""
+    text, sources = "", []
     try:
         import gemini
         if gemini.available():
             log(f"Summarizing your {label}…")
-            text = gemini.summarize_period("\n".join(lines), label, log=log)
+            text, sources = gemini.summarize_period("\n".join(lines), label, log=log)
     except Exception as e:
         log(f"{label.capitalize()} insight skipped ({e}).")
-        text = ""
+        text, sources = "", []
 
     if text:
         try:
             analyze.atomic_write_json(cache_path, {
-                "sig": sig, "text": text,
+                "sig": sig, "text": text, "sources": sources,
                 "generated": dt.datetime.now().isoformat(timespec="seconds")})
         except Exception:
             pass
@@ -977,9 +1006,10 @@ def _read_period(rec_dir, label):
     try:
         with open(os.path.join(rec_dir, f"period_{label}.json"), encoding="utf-8") as f:
             d = json.load(f)
-        return (d.get("text") or "").strip(), (d.get("generated") or "")
+        return ((d.get("text") or "").strip(), (d.get("generated") or ""),
+                [s for s in (d.get("sources") or []) if s.get("uri")])
     except Exception:
-        return "", ""
+        return "", "", []
 
 
 def build_dashboard(rec_dir, log=print):
@@ -1011,15 +1041,22 @@ def build_dashboard(rec_dir, log=print):
 
     # Weekly + monthly roll-ups (model-written; cached, refreshed each Process run)
     for _lbl, _head in (("week", "This week"), ("month", "This month")):
-        _txt, _when = _read_period(rec_dir, _lbl)
+        _txt, _when, _src = _read_period(rec_dir, _lbl)
         if not _txt:
             continue
         _paras = "".join(f"<p style='margin:6px 0'>{esc(ln)}</p>"
                          for ln in _txt.split("\n") if ln.strip())
         _w = (f" &nbsp;·&nbsp; <span style='text-transform:none;font-weight:400'>"
               f"updated {esc(_when[:16].replace('T', ' '))}</span>") if _when else ""
+        _slist = ""
+        if _src:
+            _items = "".join(
+                f"<li><a href='{esc(s['uri'])}'>{esc(s.get('title') or s['uri'])}</a></li>"
+                for s in _src)
+            _slist = (f"<details><summary>Sources ({len(_src)})</summary>"
+                      f"<ul class='clean'>{_items}</ul></details>")
         p.append(f"<div class='card f'><h2>{_head}{_w}</h2>"
-                 f"<div class='lead'>{_paras}</div></div>")
+                 f"<div class='lead'>{_paras}</div>{_slist}</div>")
 
     p.append("<div class='searchbar'>"
              "<input class='search' id='q' autocomplete='off' spellcheck='false' "

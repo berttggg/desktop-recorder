@@ -113,7 +113,7 @@ PROXY_CRF = int(os.environ.get("GEMINI_PROXY_CRF", "32"))
 PROXY_AUDIO_KBPS = int(os.environ.get("GEMINI_PROXY_AUDIO_KBPS", "48"))
 
 # Free tier is ~10 requests/min (flash) / 15 (flash-lite); keep ~6.5s spacing.
-MIN_INTERVAL = float(os.environ.get("GEMINI_MIN_REQUEST_INTERVAL", "6.5"))
+MIN_INTERVAL = float(os.environ.get("GEMINI_MIN_REQUEST_INTERVAL", "4.0"))
 MAX_RETRIES = int(os.environ.get("GEMINI_MAX_RETRIES", "4"))
 RETRY_BACKOFF = float(os.environ.get("GEMINI_RETRY_BACKOFF", "12"))
 
@@ -147,6 +147,9 @@ MAX_TOKENS_REDUCE = int(os.environ.get("GEMINI_MAX_TOKENS_REDUCE", "3072"))
 MAX_TOKENS_OVERVIEW = int(os.environ.get("GEMINI_MAX_TOKENS_OVERVIEW", "1100"))
 MAX_TOKENS_PERIOD = int(os.environ.get("GEMINI_MAX_TOKENS_PERIOD", "1800"))
 MAX_TOKENS_RESEARCH = int(os.environ.get("GEMINI_MAX_TOKENS_RESEARCH", "3000"))
+# How many of the day's notable entities to research with their OWN web search
+# (each is a separate grounded call). The user has quota headroom — default high.
+RESEARCH_ENTITIES = int(os.environ.get("GEMINI_RESEARCH_ENTITIES", "15"))
 
 _MEDIA_RES = {
     "low": "MEDIA_RESOLUTION_LOW",
@@ -228,37 +231,45 @@ what is given; do not invent.
 {context}"""
 
 
-PERIOD_PROMPT = """Below are daily work summaries from the last {label} (newest
-first), with their accomplishments and the to-dos still open.
+PERIOD_PROMPT = """You can search the web. Below are daily work summaries from the
+last {label} (newest first), with their accomplishments and the to-dos still open.
 
 Write a {label} review in ENGLISH — plain text, no markdown headings, a few tight
 paragraphs. Group the days into threads rather than listing each one, and cover:
 the main themes and projects of the {label}; what was actually accomplished; how
-effort was spread; and what is still open or slipping. Be specific — name the
-real projects, people and tools. Finish with one line starting
-"Focus next {label}:" giving the single highest priority. Ground everything only
-in what is given; do not invent.
+effort was spread; and what is still open or slipping. Then add a short
+"Worth knowing:" part with relevant EXTERNAL developments or context from the web
+on the {label}'s main projects, tools or topics, and cite those sources. Be
+specific — name the real projects, people and tools. Finish with one line starting
+"Focus next {label}:" giving the single highest priority. Do not invent the user's
+own activity — only the "Worth knowing:" part may draw on the web.
 
 {context}"""
 
 
 DAY_RESEARCH_PROMPT = """You can search the web. Below is what someone did at
-their computer today: a summary, their main topics, the NOTABLE entities they came
-across (people, social accounts like @handles, companies/brands, products/tools,
-stock tickers, titles), and their open to-dos. Add genuinely useful OUTSIDE
-context — ENGLISH, plain text, no markdown headings:
+their computer today: a summary, their main topics, and their open to-dos. Add
+genuinely useful OUTSIDE context — ENGLISH, plain text, no markdown headings:
 
-1) For the most notable few entities, say concisely WHO/WHAT each is, what's
-   notable or recent about it, and why it might matter to this person — each with
-   a link. (e.g. an X account they followed: who they are and what they post.)
-2) A couple of sentences of relevant background / recent developments on the
-   day's main topics or tools.
-3) For each open to-do, one concrete pointer (resource, doc, or approach) + a link.
+1) A few sentences of relevant background / recent developments on the day's main
+   topics or tools.
+2) For each open to-do, one concrete pointer (resource, doc, or approach) + a link.
 
-Cite the pages you used. Be specific; skip anything you can't ground. Here is the
-day:
+Cite the pages you used. Be specific; skip anything you can't ground. (The notable
+people/accounts/companies/tickers are researched separately, so focus here on the
+topics and to-dos.) Here is the day:
 
 {context}"""
+
+
+ENTITY_RESEARCH_PROMPT = """You can search the web. Someone came across this on
+their screen today. Write a short, specific brief in ENGLISH (plain text, no
+markdown headings): WHO or WHAT it is, what is notable or recent about it, and why
+it might matter to this person. Cite the pages you used; if you can't find
+reliable information, say so in one line.
+
+Item: {entity}
+Context (what the person was doing today): {context}"""
 
 
 DEEPDIVE_PROMPT = """You can search the web. Research the following topic or
@@ -1195,18 +1206,24 @@ def summarize_overview(context, log=print):
 
 def summarize_period(context, label, log=print):
     """Model-written weekly/monthly review for the dashboard. ``label`` is "week"
-    or "month". Returns plain text, or '' on any failure."""
+    or "month". Web-grounded when research is enabled (adds external trends +
+    sources). Returns ``(text, sources)``; ('', []) on failure."""
     context = (context or "").strip()
     if not context:
-        return ""
+        return "", []
     prompt = PERIOD_PROMPT.format(label=label, context=context[:18000])
     try:
-        resp = _generate(_client(), REDUCE_MODEL, [prompt],
-                         _text_config(MAX_TOKENS_PERIOD), log, label)
-        return (_resp_text(resp) or "").strip()
+        grounded = research_enabled()
+    except Exception:
+        grounded = False
+    cfg = _grounded_config(MAX_TOKENS_PERIOD) if grounded else _text_config(MAX_TOKENS_PERIOD)
+    try:
+        resp = _generate(_client(), REDUCE_MODEL, [prompt], cfg, log, label)
+        text = (_resp_text(resp) or "").strip()
+        return text, (_grounding_sources(resp) if grounded else [])
     except Exception as e:
         log(f"Gemini {label} summary error: {e}")
-        return ""
+        return "", []
 
 
 def research_enabled():

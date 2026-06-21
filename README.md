@@ -30,11 +30,13 @@ of thought, and can answer "what was I working on last Tuesday afternoon?" by
   **named things on your screen** (people & social accounts like @handles,
   companies, products/tools, stock tickers, titles) into a **People & things
   noticed** list. Then, using Google Search grounding, each day report gets a
-  **Research & resources** section that explains who/what the notable ones are
-  (e.g. an account you followed — who they are and what they post), adds context
-  on the day's topics, and gives a link/how-to per open to-do — all with **cited
-  sources**. A **Deep dive** box researches any topic/question on demand into a
-  sourced brief. (Sends those queries to Google; uses your search quota.)
+  **Research & resources** section: a **separate web search for each notable
+  entity** (e.g. an account you followed — who they are, what they post, why it
+  matters), plus background on the day's topics and a link/how-to per open to-do —
+  all with **cited sources**. The **weekly and monthly roll-ups are web-grounded
+  too**, adding outside trends and sources. A **Deep dive** box researches any
+  topic/question on demand into a sourced brief. (Sends those queries to Google;
+  the app spends search quota generously for richer insight.)
 - **Records now, uploads later** — recording only captures to disk in crash-safe
   ~10-minute segments; nothing is sent to the cloud until you click **Process
   recordings**. Ideal for spotty or restricted networks: record offline, then
