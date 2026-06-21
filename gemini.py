@@ -141,7 +141,8 @@ POLL_INTERVAL = 2.0
 # Each upload is retried this many times before the window is skipped — a flaky
 # network often times out / resets the first connection but succeeds on a retry.
 UPLOAD_ATTEMPTS = max(1, int(os.environ.get("GEMINI_UPLOAD_ATTEMPTS", "3")))
-MAX_TOKENS_SEG = int(os.environ.get("GEMINI_MAX_TOKENS_SEG", "2048"))
+# Big enough for a near-verbatim transcript of a whole chunk plus the blocks.
+MAX_TOKENS_SEG = int(os.environ.get("GEMINI_MAX_TOKENS_SEG", "8192"))
 MAX_TOKENS_REDUCE = int(os.environ.get("GEMINI_MAX_TOKENS_REDUCE", "2048"))
 MAX_TOKENS_OVERVIEW = int(os.environ.get("GEMINI_MAX_TOKENS_OVERVIEW", "700"))
 
@@ -153,18 +154,28 @@ _MEDIA_RES = {
 
 
 SEG_PROMPT = """This is a {secs}-second clip of a screen recording (video plus
-its audio). Identify the distinct activities the user worked on, in time order.
-Reply with ONE JSON object and no prose:
+its audio). Do TWO things and reply with ONE JSON object and no prose:
+
+1) Segment the distinct activities the user worked on, in time order.
+2) Transcribe the speech you can hear — the user, people on a call, or any
+   video/audio they are playing — as completely and accurately as you can.
+
 {{"blocks":[
   {{"start": <seconds from the start of THIS clip>,
     "end": <seconds from the start of THIS clip>,
     "activity": "<=5 word label of the main task",
     "app": "main app or website",
     "detail": "one sentence on what happened",
-    "speech": "brief note of anything said aloud in this span, else empty",
     "todos": ["a task the user explicitly said they still need to do"]}}
-]}}
-Use 1-6 blocks. Only state what the video/audio support; use "" or [] when unknown."""
+ ],
+ "transcript":[
+  {{"t": <seconds from the start of THIS clip when this line starts>,
+    "text": "the exact words spoken, verbatim"}}
+ ]}}
+Use 1-6 blocks. Make the transcript NEAR-VERBATIM and split it into short lines
+(about one sentence each), each with the time it starts; capture everything
+spoken, not a summary. Use [] for transcript only if there is genuinely no
+speech. Only state what the video/audio support; use "" or [] when unknown."""
 
 REDUCE_PROMPT = """You are writing a concise daily work journal from a log of what
 a user did on their computer. Each line is: time | activity | app | detail | todos.
@@ -961,6 +972,7 @@ def analyze_one(seg, base, ffmpeg, log=print, client=None, thumbdir=None):
                 continue
             raw = (data.get("blocks") if isinstance(data, dict)
                    else data if isinstance(data, list) else [])
+            utter = data.get("transcript") if isinstance(data, dict) else None
             for blk in _coerce_blocks(raw, w0, w1, base):
                 mid_rel = (blk["t0"] + blk["t1"]) / 2.0 - base
                 thumb = os.path.join(thumbdir, f"{stem}_{tidx:04d}.jpg")
@@ -970,9 +982,22 @@ def analyze_one(seg, base, ffmpeg, log=print, client=None, thumbdir=None):
                 blocks.append({"t0": blk["t0"], "t1": blk["t1"], "thumb": thumb,
                                "activity": blk["activity"], "app": blk["app"],
                                "detail": blk["detail"], "todos": blk["todos"]})
-                if blk["speech"]:
+                # Per-block speech is only a fallback for older replies that lack
+                # the dedicated verbatim transcript array below.
+                if not utter and blk["speech"]:
                     transcript.append((blk["t0"], blk["t1"], blk["speech"]))
                 log(f"      {analyze.fmt_clock(blk['t0'])}: {blk['activity']}")
+            # Preferred: the near-verbatim transcript lines (each with a start t).
+            for u in (utter or []):
+                if not isinstance(u, dict):
+                    continue
+                txt = _clean(u.get("text"))
+                if not txt:
+                    continue
+                t_abs = _abs_time(_num(u.get("t")), w0, w1, base)
+                if t_abs is None:
+                    t_abs = base + w0
+                transcript.append((t_abs, t_abs, txt))
         finally:
             try:
                 client.files.delete(name=f.name)  # don't leave it on their servers
@@ -995,7 +1020,7 @@ def analyze_video(session_dir, ffmpeg, log=print):
     Returns (blocks, transcript, total_dur, tmp_dirs) with the same shapes the
     Claude pipeline produces:
       blocks     -> [{t0,t1,thumb,activity,app,detail,todos}]
-      transcript -> [(t0, t1, speech)]  (one entry per block that had speech)
+      transcript -> [(t0, t1, text)]  (near-verbatim speech lines, time-ordered)
       tmp_dirs   -> dirs for the caller to clean up afterwards
     """
     segs = sorted(glob.glob(os.path.join(session_dir, "seg_*.mp4"))) or \
