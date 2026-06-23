@@ -740,6 +740,10 @@ def _upload_active(client, path, log):
             return _upload_once(client, path)
         except Exception as e:
             last = e
+            # A server-side media rejection (processing state=FAILED) won't heal by
+            # re-uploading identical bytes — don't burn the retry budget on it.
+            if "state=FAILED" in str(e):
+                raise
             if attempt < UPLOAD_ATTEMPTS:
                 back = 2.0 * attempt
                 log(f"      upload attempt {attempt}/{UPLOAD_ATTEMPTS} failed "
@@ -1032,6 +1036,7 @@ def analyze_one(seg, base, ffmpeg, log=print, client=None, thumbdir=None):
     blocks, transcript = [], []
     tidx = 0
     upload_fails = 0
+    dead_windows = 0          # windows with no usable video (frozen/corrupt source)
     last_upload_err = None
     for wi, (w0, w1) in enumerate(wins):
         # We always upload a lightweight proxy (low-fps, mono audio), never the
@@ -1049,13 +1054,35 @@ def analyze_one(seg, base, ffmpeg, log=print, client=None, thumbdir=None):
         if not _make_upload_clip(ffmpeg, seg, w0, w1, upload_path, whole):
             log("      proxy build failed; skipping window.")
             continue
+        # The proxy must hold real, playable video. A source that froze or got
+        # corrupted (classic across-sleep artifact) makes -ss seek past the real
+        # frames and yields a header-only clip the Files API rejects (state=FAILED).
+        # That's a CONTENT problem, not a network one — re-uploading never heals it,
+        # so detect it locally and skip the window WITHOUT failing the segment
+        # (otherwise ok=False would pin the whole segment in a forever-retry loop).
+        pdur = analyze.get_duration(upload_path, ffmpeg) or 0.0
+        psize = os.path.getsize(upload_path) if os.path.isfile(upload_path) else 0
+        if pdur < 1.0 or psize < 2048:
+            log(f"      no usable video in this window ({pdur:.1f}s, {psize // 1024}KB) "
+                f"— source looks frozen/corrupt (often from recording across sleep); "
+                f"skipping.")
+            _safe_rm(upload_path)
+            dead_windows += 1
+            continue
         try:
             f = _upload_active(client, upload_path, log)
         except Exception as e:
+            _safe_rm(upload_path)
+            if "state=FAILED" in str(e):
+                # Server rejected the media itself — won't heal on retry, so treat
+                # it as a content skip (don't set ok=False / re-process forever).
+                log(f"  {os.path.basename(upload_path)}: server rejected the clip "
+                    f"(state=FAILED) — likely unplayable/corrupt; skipping window.")
+                dead_windows += 1
+                continue
             upload_fails += 1
             last_upload_err = e
             log(f"  upload failed for {os.path.basename(upload_path)}: {e}; skipping.")
-            _safe_rm(upload_path)
             continue
         try:
             contents = [_video_part(f),
@@ -1105,6 +1132,11 @@ def analyze_one(seg, base, ffmpeg, log=print, client=None, thumbdir=None):
 
     if wins and upload_fails == len(wins):
         _warn_network_blocked(log, last_upload_err)
+    if dead_windows:
+        log(f"  note: {dead_windows}/{len(wins)} window(s) had no usable video "
+            f"(frozen/corrupt source — typically recorded across a sleep/lid-close). "
+            f"Analyzed the rest; the segment is still marked done so it won't retry "
+            f"these forever.")
 
     blocks.sort(key=lambda b: b["t0"])
     transcript.sort(key=lambda t: t[0])
